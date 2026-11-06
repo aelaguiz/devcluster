@@ -1,0 +1,10 @@
+# The laptop you work from. It syncs for real.
+mode = "on"
+os = "macos"
+
+# The skills are edited here, so here they sync both ways instead of only following.
+[[repo]]
+name = "skills"
+path = "~/workspace/skills"
+url = "git@github.com:you/skills.git"
+install = "make install"
