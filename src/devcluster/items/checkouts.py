@@ -158,6 +158,7 @@ def sync_tool(item, ctx):
     if local:
         return result(item, BLOCKED, f"has {plural(local, 'commit')} that origin doesn't have; devcluster won't move it off them. If this machine is where it's edited, list it as a [[repo]] here")
 
+    forward = False
     if branch_target:
         current = git.branch()
         if current != ref:
@@ -176,7 +177,7 @@ def sync_tool(item, ctx):
         moved = git.run("checkout", "--quiet", "--detach", target, timeout=MERGE_TIMEOUT)
     if not moved.ok:
         return _update_failed(item, moved, f"moving it to {short(target)}", done)
-    done.append(f"moved from {short(head)} to {short(target)}")
+    done.append(f"{'updated' if branch_target and forward else 'moved'} from {short(head)}")
     memory["at"] = target
     return _after_update(item, ctx, git, done)
 

@@ -189,4 +189,5 @@ def sync_file(item, ctx):
         return result(item, WOULD_CHANGE, "; ".join(notes))
     if changed:
         return result(item, CHANGED, "; ".join(notes))
-    return result(item, OK, f"{plural(len(item.get('targets')), 'target')} match the config")
+    count = len(item.get("targets"))
+    return result(item, OK, "matches the config" if count == 1 else f"all {count} targets match the config")

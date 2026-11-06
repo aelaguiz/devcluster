@@ -142,7 +142,7 @@ class StatusText(unittest.TestCase):
             ]},
         }
         text = render(reports, ["laptop", "server", "studio"], 900, clock=1000)
-        self.assertIn("1 need you, 1 OK", text)
+        self.assertIn("1 needs you, 1 OK", text)
         self.assertIn("60 min ago (stale)", text)
         self.assertIn("studio", text)
         self.assertIn("never reported", text)

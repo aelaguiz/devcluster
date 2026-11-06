@@ -101,6 +101,8 @@ def _ago(seconds):
 def _tally_text(tally):
     order = (BLOCKED, FAILED, BUSY, WOULD_CHANGE, CHANGED, OK)
     words = {OK: "OK", CHANGED: "updated", WOULD_CHANGE: "would change", BLOCKED: "need you", FAILED: "failed", BUSY: "busy"}
+    if tally.get(BLOCKED) == 1:
+        words[BLOCKED] = "needs you"
     parts = [f"{tally[state]} {words[state]}" for state in order if tally.get(state)]
     return ", ".join(parts) or "nothing listed"
 
