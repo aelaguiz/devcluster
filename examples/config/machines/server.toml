@@ -1,0 +1,4 @@
+# A Linux server. New machines start in dry run: they report what they would change.
+mode = "dry-run"
+os = "linux"
+skip = ["agent-instructions"]

@@ -1,0 +1,5 @@
+[user]
+	name = Test
+	email = test@example.invalid
+[init]
+	defaultBranch = main

@@ -1,0 +1,45 @@
+# What every machine gets. Each machine's own file is in machines/.
+# The reference for every field is docs/config.md in the devcluster repo.
+
+[devcluster]
+# The devcluster version every machine runs: a tag or a full commit ID.
+# engine = "v0.1.0"
+
+# A repo agents commit to directly on main: synced both ways on every machine.
+[[repo]]
+path = "~/workspace/notes"
+url = "git@github.com:you/notes.git"
+
+# A repo only some machines need.
+[[repo]]
+path = "~/workspace/app"
+url = "git@github.com:you/app.git"
+on = ["laptop", "server"]
+
+# A tool every machine follows, installed the way the repo installs itself.
+[[tool]]
+name = "skills"
+path = "~/workspace/skills"
+url = "https://github.com/you/skills.git"
+ref = "main"
+install = "make install"
+
+# A command-line tool pinned to one version.
+[[cli]]
+name = "codex"
+version = "0.163.0"
+check = "codex --version"
+install = "npm install -g @openai/codex@{version}"
+
+# An encrypted secrets repo, driven by its own commands.
+[secrets]
+path = "~/workspace/secrets"
+url = "git@github.com:you/secrets.git"
+check = "./bin/secrets check"
+decrypt = "./bin/secrets decrypt"
+
+# A file from this repo, put in place on every machine.
+[[file]]
+name = "agent-instructions"
+source = "files/AGENTS.md"
+targets = ["~/.codex/AGENTS.md", "~/.claude/CLAUDE.md"]
