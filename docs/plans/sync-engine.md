@@ -80,13 +80,13 @@ On each run: fetch `main` from origin, then compare.
 - **Ahead only:** push. If origin moved in the meantime, fetch and go round again, up to three times.
 - **Both:** test the merge with `git merge-tree`, which doesn't touch the working tree. If it would conflict, stop and report the conflicted files. Nothing has changed at that point. If it's clean, make the merge commit, fast-forward to it, and push.
 
-Safety comes from Git itself. A fast-forward refuses to overwrite uncommitted changes, so devcluster passes that refusal on as "Needs you" with the file names. devcluster also turns off the two ways a fast-forward can still replace work: it never overwrites an ignored file in the way, and it never autostashes, whatever the machine's Git config says. It checks the branch again right before it changes anything, in case an agent switched it during a long fetch. Uncommitted changes in other files stay where they are. devcluster also leaves a checkout alone when it's mid-merge or mid-rebase, when it's checked out on another branch, or when its origin isn't the one in the list. It never force-pushes a repo, and it never rebases, so commit IDs never change.
+Safety comes from Git itself. A fast-forward refuses to overwrite uncommitted changes, so devcluster passes that refusal on as "Needs you" with the file names. devcluster also turns off the two ways a fast-forward can still replace work: it never overwrites an ignored file in the way, and it never autostashes, whatever the machine's Git config says. It checks the branch again right before it changes anything, in case an agent switched it during a long fetch, and again right after. A switch in the instant between means the other branch got origin's commits; that adds commits and loses none, and it's reported. Uncommitted changes in other files stay where they are. devcluster also leaves a checkout alone when it's mid-merge or mid-rebase, when it's checked out on another branch, or when its origin isn't the one in the list. It never force-pushes a repo, and it never rebases, so commit IDs never change.
 
 Testing a merge without touching the working tree needs Git 2.38 or newer.
 
 ### Tools
 
-A tool follows `ref`: a branch (the default is `main`), a tag or a commit. When the checkout is behind on that branch, it fast-forwards. Going back, or to a pinned tag or commit, checks out that commit detached rather than moving a branch, so no commit can be dropped, not even one an agent makes during the run. A tool checkout with commits that aren't on origin is reported, not moved. A machine where you edit the tool lists it as a `[[repo]]` instead.
+A tool follows `ref`: a branch (the default is `main`), a tag or a commit. When the checkout is behind on that branch, it fast-forwards. Going back, or to a pinned tag or commit, checks out that commit detached rather than moving a branch, so no commit on a branch can be dropped. If an agent commits on a detached checkout in the moment devcluster moves it, that commit is put on a branch named `devcluster-kept-<commit>` and reported. A tool checkout with commits that aren't on origin is reported, not moved. A machine where you edit the tool lists it as a `[[repo]]` instead.
 
 The `install` command runs when the commit changes, and once on the first run. When an install fails, devcluster records it and doesn't retry for an hour, unless the commit changes first.
 
@@ -102,7 +102,7 @@ devcluster drives the secrets repo's own commands in the order that repo documen
 2. Fast-forward.
 3. Run `decrypt`, then `check` again.
 
-If a decrypt fails, for example because the key couldn't be read, the next run retries the decrypt instead of mistaking the stale files for a local edit.
+If a decrypt fails, for example because the key couldn't be read, the next run retries the decrypt instead of mistaking the stale files for a local edit. It retries only if no decrypted file has changed since the failure; if one has, it reports it rather than decrypting over an edit.
 
 Its output is never recorded or pushed, only the exit code.
 
@@ -141,10 +141,10 @@ What the tests prove:
 
 | Area | Cases |
 |---|---|
-| Repos | Fast-forward. Push. A clean merge both ways, where every machine ends up with every commit. A conflict, where nothing changes and no merge is left half-done. An uncommitted file in the way, an untracked one, and an ignored one. Uncommitted files out of the way. A Git config with autostash on. Mid-merge. A held Git lock. The wrong branch, and a switch to another branch during the fetch. A wrong origin, and a URL Git rewrites. A clone. A push race, where another machine pushes first. Dry run predicting each of these. |
-| Tools | Update and install. No reinstall when nothing moved. A failed install backs off, then retries when the commit changes. Local commits block. A pinned commit. Origin's branch moved back, which detaches without moving the branch. |
+| Repos | Fast-forward. Push. A clean merge both ways, where every machine ends up with every commit. A conflict, where nothing changes and no merge is left half-done. An uncommitted file in the way, an untracked one, and an ignored one. Uncommitted files out of the way. A Git config with autostash on. Mid-merge. A held Git lock. The wrong branch, a switch to another branch during the fetch, and one just before the update. A wrong origin, and a URL Git rewrites. A clone. A push race, where another machine pushes first. Dry run predicting each of these. |
+| Tools | Update and install. No reinstall when nothing moved. A failed install backs off, then retries when the commit changes. Local commits block. A pinned commit. Origin's branch moved back, which detaches without moving the branch. A commit made during a move, kept on a branch. |
 | CLIs | A match, a mismatch, a version that only shares a prefix, a failed install backing off |
-| Secrets | Pull and decrypt. A local edit blocks the pull. A failed decrypt is retried. No secret value ever appears in the results, the log or the status branch. |
+| Secrets | Pull and decrypt. A local edit blocks the pull. A failed decrypt is retried, but not over a file edited since. No secret value ever appears in the results, the log or the status branch. |
 | Files | Write, update, an edit kept, a first-time file moved aside |
 | Config | Validation errors stop the run and are reported. `on`, `skip` and replacement work. A machine missing from the config is reported. |
 | Engine | Updates itself to the version the config names, then restarts on it. A second run exits while one is going. The launchd and systemd files are correct. |

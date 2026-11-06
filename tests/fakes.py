@@ -39,6 +39,28 @@ FAKE_SECRETS = textwrap.dedent('''\
 SECRET_VALUE = "hunter2-do-not-leak"
 
 
+def wrap_git(machine, pattern, before=":", after=":"):
+    """Put a git first on the machine's PATH that runs a shell command, once, just before or
+    just after the first git call matching a `case` pattern, the way an agent might act
+    in the middle of a run. The command can call the real git as "$real". Returns the PATH."""
+    folder = machine.path("wrapped-bin")
+    folder.mkdir(exist_ok=True)
+    flag = machine.path("wrapped-fired")
+    script = folder / "git"
+    script.write_text(textwrap.dedent(f"""\
+        #!/bin/sh
+        real="{shutil.which('git')}"
+        hit=
+        case " $* " in {pattern}) [ -e "{flag}" ] || {{ touch "{flag}"; hit=1; }} ;; esac
+        [ -n "$hit" ] && {{ {before}; }}
+        "$real" "$@"; code=$?
+        [ -n "$hit" ] && {{ {after}; }}
+        exit $code
+        """))
+    script.chmod(0o755)
+    return f"{folder}:{machine.env()['PATH']}"
+
+
 def git(cwd, *args, env=None, check=True):
     result = subprocess.run(["git", *args], cwd=cwd, env=env or base_env(), capture_output=True, text=True)
     if check and result.returncode != 0:

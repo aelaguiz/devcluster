@@ -82,21 +82,27 @@ def sync_secrets(item, ctx):
         return problem
     if git.branch() != branch:
         return result(item, BLOCKED, f"is checked out on {git.branch() or 'a detached commit'}, not {branch}")
-    # A decrypt that failed after a pull leaves files the check would mistake for a local
-    # edit. Retry the decrypt instead, so a key that was briefly unreadable doesn't block it for good.
-    if ctx.mem(item).get("decrypt_pending") == git.rev("HEAD"):
-        if ctx.dry_run:
-            return result(item, WOULD_CHANGE, "would retry decrypting, which failed on an earlier run")
-        return _decrypt(item, ctx, git, timeout, "retried decrypting")
-    checked = shell(item.get("check"), cwd=path, timeout=timeout)
-    if not checked.ok:
-        return result(item, BLOCKED, f"its check failed here (exit {checked.code}): this machine may have a credential edit nobody has published. Run the check by hand to see which file")
+    # A decrypt that failed leaves files the check would mistake for a local edit. If none of
+    # the decrypted files changed since it failed, retry instead of blocking for good.
+    memory = ctx.mem(item)
+    retrying = "decrypt_pending" in memory
+    if retrying:
+        if _plaintext(git) != memory.get("plaintext"):
+            return result(item, BLOCKED, "a decrypt failed on an earlier run, and a decrypted file here has changed since, so devcluster won't decrypt over it. Run the check by hand to see which file")
+    else:
+        checked = shell(item.get("check"), cwd=path, timeout=timeout)
+        if not checked.ok:
+            return result(item, BLOCKED, f"its check failed here (exit {checked.code}): this machine may have a credential edit nobody has published. Run the check by hand to see which file")
     fetched = git.run("fetch", "--quiet", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}", timeout=FETCH_TIMEOUT)
     if not fetched.ok:
         return result(item, FAILED, f"couldn't fetch from origin: {fetched.first_line()}")
     head = git.rev("HEAD")
     remote = git.rev(f"refs/remotes/origin/{branch}")
     if head == remote:
+        if retrying:
+            if ctx.dry_run:
+                return result(item, WOULD_CHANGE, "would retry decrypting, which failed on an earlier run")
+            return _decrypt(item, ctx, git, timeout, "retried decrypting")
         return result(item, OK, "up to date, and its check passes")
     if not git.is_ancestor(head, remote):
         return result(item, BLOCKED, f"has {plural(git.local_only('HEAD'), 'commit')} here that origin doesn't have")
@@ -109,17 +115,33 @@ def sync_secrets(item, ctx):
     return _decrypt(item, ctx, git, timeout, f"pulled {plural(behind, 'commit')}")
 
 
+def _plaintext(git):
+    """The size and modification time of each file Git doesn't track, which is where the
+    decrypted secrets live. Nothing derived from their contents is kept."""
+    listing = git.run("ls-files", "-z", "--others", timeout=120)
+    prints = {}
+    for name in sorted(filter(None, listing.out.split("\0"))):
+        try:
+            stat = (git.path / name).stat()
+            prints[name] = [stat.st_size, stat.st_mtime_ns]
+        except OSError:
+            prints[name] = None
+    return prints
+
+
 def _decrypt(item, ctx, git, timeout, done):
     path = git.path
     memory = ctx.mem(item)
-    memory["decrypt_pending"] = git.rev("HEAD")
     decrypted = shell(item.get("decrypt"), cwd=path, timeout=timeout)
     if not decrypted.ok:
+        memory.update(decrypt_pending=git.rev("HEAD"), plaintext=_plaintext(git))
         return result(item, FAILED, f"{done}, but decrypting failed (exit {decrypted.code}); check that this machine's key can read it")
     checked = shell(item.get("check"), cwd=path, timeout=timeout)
     if not checked.ok:
+        memory.update(decrypt_pending=git.rev("HEAD"), plaintext=_plaintext(git))
         return result(item, FAILED, f"{done} and decrypted, but the check afterwards failed (exit {checked.code})")
     memory.pop("decrypt_pending", None)
+    memory.pop("plaintext", None)
     return result(item, CHANGED, f"{done} and decrypted; its check passes")
 
 

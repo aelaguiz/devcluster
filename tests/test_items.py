@@ -3,7 +3,7 @@
 import base64
 import json
 
-from tests.fakes import FAKE_SECRETS, SECRET_VALUE, ClusterTest, git
+from tests.fakes import FAKE_SECRETS, SECRET_VALUE, ClusterTest, git, wrap_git
 
 INSTALL = 'mkdir -p "$HOME/.skills" && cp skill.txt "$HOME/.skills/skill.txt" && echo run >> "$HOME/.install-count"'
 
@@ -96,6 +96,23 @@ class Tools(ClusterTest):
         self.assertState(self.laptop, "skills", "changed", "ran its install")
         self.assertEqual(self.laptop.path(".skills/skill.txt").read_text(), "v3\n")
 
+    def test_commit_made_during_a_move_is_kept_on_a_branch(self):
+        first = self.world.head("skills")
+        second = self.world.commit("skills", {"skill.txt": "v2\n"})
+        self.start(ref=first)
+        tool = self.laptop.path("tools/skills")
+        commit = f'(cd "{tool}" && echo mine > mine.txt && "$real" add mine.txt && "$real" commit --quiet -m mine)'
+        path = wrap_git(self.laptop, f'*" -C {tool} checkout "*', before=commit)
+        self.world.commit("config", {"cluster.toml": self.world.work.joinpath("config/cluster.toml").read_text().replace(first, second)})
+        self.laptop.sync(PATH=path)
+        self.assertState(self.laptop, "skills", "blocked", "that commit is kept on branch devcluster-kept-")
+        kept = self.laptop.git("tools/skills", "for-each-ref", "--format=%(refname:short)", "refs/heads/devcluster-kept-*")
+        self.assertEqual(self.laptop.git("tools/skills", "show", f"{kept}:mine.txt"), "mine")
+        self.assertEqual(self.laptop.git("tools/skills", "rev-parse", "HEAD"), second)
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "changed", "ran its install")
+        self.assertEqual(self.laptop.path(".skills/skill.txt").read_text(), "v2\n")
+
 
 class Clis(ClusterTest):
     def start(self, version, install='echo "{version}" > "$HOME/.fake-cli"'):
@@ -180,6 +197,18 @@ class Secrets(ClusterTest):
         self.assertEqual(self.laptop.path("secrets/local/new.env").read_text(), "NEW=1\n")
         self.laptop.sync()
         self.assertState(self.laptop, "secrets", "ok")
+
+    def test_a_failed_decrypt_is_not_retried_over_a_local_edit(self):
+        self.laptop.path(".fail-decrypt").write_text("")
+        self.world.commit("secrets", {"encrypted/new.env.enc": base64.b64encode(b"NEW=1\n").decode()})
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "failed", "decrypting failed")
+        self.laptop.path("secrets/local/app.env").write_text(f"TOKEN={SECRET_VALUE}-edited\n")
+        self.laptop.path(".fail-decrypt").unlink()
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "blocked", "has changed since, so devcluster won't decrypt over it")
+        self.assertIn("-edited", self.laptop.path("secrets/local/app.env").read_text())
+        self.assertNoLeak()
 
     def test_unpublished_local_edit_blocks_the_pull(self):
         before = self.laptop.git("secrets", "rev-parse", "HEAD")

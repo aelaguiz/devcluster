@@ -3,7 +3,7 @@
 import shutil
 import textwrap
 
-from tests.fakes import ClusterTest, git
+from tests.fakes import ClusterTest, git, wrap_git
 
 CLUSTER = """\
 [[repo]]
@@ -169,29 +169,26 @@ class RepoSync(ClusterTest):
         self.assertEqual(self.laptop.git("workspace/work", "stash", "list"), "")
 
     def test_branch_switched_during_the_fetch_is_left_alone(self):
-        # A git wrapper switches the checkout to another branch right after the fetch,
-        # the way an agent might while a long fetch runs.
-        real = shutil.which("git")
-        wrapper = self.laptop.path("wrapped-bin")
-        wrapper.mkdir()
         repo = self.laptop.path("workspace/work")
-        flag = self.laptop.path("switched")
-        (wrapper / "git").write_text(textwrap.dedent(f"""\
-            #!/bin/sh
-            "{real}" "$@"; code=$?
-            case " $* " in
-              *" -C {repo} fetch "*) [ -e "{flag}" ] || {{ touch "{flag}"; "{real}" -C "{repo}" checkout --quiet -b feature; }} ;;
-            esac
-            exit $code
-            """))
-        (wrapper / "git").chmod(0o755)
+        path = wrap_git(self.laptop, f'*" -C {repo} fetch "*', after=f'"$real" -C "{repo}" checkout --quiet -b feature')
         self.world.commit("work", {"README.md": "new\n"})
         before = self.laptop.git("workspace/work", "rev-parse", "main")
-        path = f"{wrapper}:{self.laptop.env()['PATH']}"
         self.laptop.sync(PATH=path)
         self.assertState(self.laptop, "work", "blocked", "was switched to feature during the run")
         self.assertEqual(self.laptop.git("workspace/work", "rev-parse", "main"), before)
         self.assertEqual(self.laptop.git("workspace/work", "rev-parse", "feature"), before)
+
+    def test_branch_switched_just_before_the_update_is_reported(self):
+        # The switch lands after the last check and before the fast-forward, so the
+        # fast-forward moves the other branch. That only adds commits; it must be reported.
+        repo = self.laptop.path("workspace/work")
+        path = wrap_git(self.laptop, f'*" -C {repo} merge "*', before=f'"$real" -C "{repo}" checkout --quiet -b feature')
+        new = self.world.commit("work", {"README.md": "new\n"})
+        before = self.laptop.git("workspace/work", "rev-parse", "main")
+        self.laptop.sync(PATH=path)
+        self.assertState(self.laptop, "work", "blocked", "was switched to feature while devcluster updated it, so that got origin's commits instead of main")
+        self.assertEqual(self.laptop.git("workspace/work", "rev-parse", "main"), before)
+        self.assertEqual(self.laptop.git("workspace/work", "rev-parse", "feature"), new)
 
     def test_url_rewrites_are_understood(self):
         # The list names an SSH URL; this machine's Git rewrites it to where the repo really is.

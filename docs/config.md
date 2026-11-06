@@ -48,7 +48,7 @@ A Git repo of encrypted secrets, with its own commands to check and decrypt them
 | `branch` | no | Defaults to `main` |
 | `timeout` | no | Seconds for each command, default 600 |
 
-A run checks first. If the check fails, this machine may have an edit nobody published, so the run stops there. Otherwise it fast-forwards, decrypts and checks again. Neither command's output is recorded.
+A run checks first. If the check fails, this machine may have an edit nobody published, so the run stops there. Otherwise it fast-forwards, decrypts and checks again. If the decrypt fails, the next run retries it, unless a decrypted file has changed since. Neither command's output is recorded.
 
 ### [[repo]]
 
@@ -74,7 +74,7 @@ A repo a machine only follows: it moves to `ref` and never pushes.
 | `install` | no | A command run in the checkout whenever its commit changes, and once on the first run |
 | `timeout`, `install_timeout` | no | As for a repo |
 
-A tool checkout with commits origin doesn't have is left alone. On a machine where you edit the tool, list it as a `[[repo]]` in that machine's file instead. Moving back, or to a pinned tag or commit, leaves the checkout detached at that commit: devcluster never moves a tool's branch backward.
+A tool checkout with commits origin doesn't have is left alone. On a machine where you edit the tool, list it as a `[[repo]]` in that machine's file instead. Moving back, or to a pinned tag or commit, leaves the checkout detached at that commit: devcluster never moves a tool's branch backward. A commit made on a detached checkout while devcluster moves it is kept on a branch named `devcluster-kept-<commit>`.
 
 ### [[cli]]
 

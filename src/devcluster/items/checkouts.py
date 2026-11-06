@@ -72,6 +72,9 @@ def sync_repo(item, ctx):
                 if _raced(moved):
                     continue
                 return _update_failed(item, moved, f"pulling {plural(behind, 'commit')} from origin", done)
+            switched = _switched(item, git, branch, done, after=True)
+            if switched:
+                return switched
             done.append(f"pulled {plural(behind, 'commit')}")
             break
 
@@ -116,6 +119,9 @@ def sync_repo(item, ctx):
             if _raced(moved):
                 continue
             return _update_failed(item, moved, "merging origin's commits", done)
+        switched = _switched(item, git, branch, done, after=True)
+        if switched:
+            return switched
         done.append(f"merged {plural(behind, 'commit')} from origin")
         # The next round pushes the merge.
     else:
@@ -184,6 +190,18 @@ def sync_tool(item, ctx):
         moved = git.run("checkout", "--quiet", "--no-overwrite-ignore", "--detach", target, timeout=MERGE_TIMEOUT)
     if not moved.ok:
         return _update_failed(item, moved, f"moving it to {short(target)}", done)
+    if forward:
+        switched = _switched(item, git, ref, done, after=True)
+        if switched:
+            return switched
+    else:
+        # A commit made on a detached checkout in the moment before the move is reachable
+        # only from Git's log of where HEAD was. Keep it on a branch and say so.
+        before = git.rev("HEAD@{1}")
+        if before and before != head and not git.out("for-each-ref", "--contains", before, "refs/heads", timeout=60):
+            kept = f"devcluster-kept-{short(before)}"
+            git.run("branch", kept, before, timeout=60)
+            return result(item, BLOCKED, f"a commit was made here while devcluster moved it to {short(target)}; that commit is kept on branch {kept}")
     done.append(f"{verb}d from {short(head)}" if forward else f"moved from {short(head)}")
     memory["at"] = target
     return _after_update(item, ctx, git, done)
@@ -238,11 +256,14 @@ def _after_update(item, ctx, git, done):
     return result(item, CHANGED, f"{summary}; ran its install")
 
 
-def _switched(item, git, branch, done):
+def _switched(item, git, branch, done, after=False):
     """Stop if someone switched the checkout to another branch during the run."""
     current = git.branch()
     if current == branch:
         return None
+    if after:
+        # A fast-forward only adds commits, so nothing was lost, but they went to the wrong branch.
+        return result(item, BLOCKED, _prefix(done, f"was switched to {current or 'a detached commit'} while devcluster updated it, so that got origin's commits instead of {branch}"))
     return result(item, BLOCKED, _prefix(done, f"was switched to {current or 'a detached commit'} during the run, so devcluster stopped before changing it"))
 
 
