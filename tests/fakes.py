@@ -22,6 +22,8 @@ FAKE_SECRETS = textwrap.dedent('''\
     root = pathlib.Path(__file__).resolve().parent.parent
     encrypted, local = root / "encrypted", root / "local"
     action = sys.argv[1]
+    if action == "decrypt" and (pathlib.Path.home() / ".fail-decrypt").exists():
+        sys.exit("decrypt: key not readable")
     for path in sorted(encrypted.glob("*.enc")):
         plain = base64.b64decode(path.read_bytes())
         target = local / path.stem

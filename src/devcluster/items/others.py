@@ -10,7 +10,7 @@ from ..git import Git, clone
 from ..paths import clock, expand
 from ..proc import shell, tail
 from ..results import BLOCKED, CHANGED, FAILED, OK, WOULD_CHANGE, plural
-from .checkouts import CLONE_TIMEOUT, FETCH_TIMEOUT, MERGE_TIMEOUT, _preflight, _update_failed
+from .checkouts import CLONE_TIMEOUT, FAST_FORWARD, FETCH_TIMEOUT, MERGE_TIMEOUT, _preflight, _update_failed
 
 CHECK_TIMEOUT = 60
 CLI_INSTALL_TIMEOUT = 1200
@@ -74,7 +74,7 @@ def sync_secrets(item, ctx):
         cloned = clone(item.get("url"), path, branch, CLONE_TIMEOUT)
         if not cloned.ok:
             return result(item, FAILED, f"couldn't clone it: {cloned.first_line()}")
-        return _decrypt(item, path, timeout, "cloned it")
+        return _decrypt(item, ctx, Git(path), timeout, "cloned it")
 
     git = Git(path)
     problem = _preflight(item, path, git)
@@ -82,6 +82,12 @@ def sync_secrets(item, ctx):
         return problem
     if git.branch() != branch:
         return result(item, BLOCKED, f"is checked out on {git.branch() or 'a detached commit'}, not {branch}")
+    # A decrypt that failed after a pull leaves files the check would mistake for a local
+    # edit. Retry the decrypt instead, so a key that was briefly unreadable doesn't block it for good.
+    if ctx.mem(item).get("decrypt_pending") == git.rev("HEAD"):
+        if ctx.dry_run:
+            return result(item, WOULD_CHANGE, "would retry decrypting, which failed on an earlier run")
+        return _decrypt(item, ctx, git, timeout, "retried decrypting")
     checked = shell(item.get("check"), cwd=path, timeout=timeout)
     if not checked.ok:
         return result(item, BLOCKED, f"its check failed here (exit {checked.code}): this machine may have a credential edit nobody has published. Run the check by hand to see which file")
@@ -97,19 +103,23 @@ def sync_secrets(item, ctx):
     behind = git.count(f"{head}..{remote}")
     if ctx.dry_run:
         return result(item, WOULD_CHANGE, f"would pull {plural(behind, 'commit')} and decrypt")
-    moved = git.run("merge", "--ff-only", "--quiet", remote, timeout=MERGE_TIMEOUT)
+    moved = git.run(*FAST_FORWARD, remote, timeout=MERGE_TIMEOUT)
     if not moved.ok:
         return _update_failed(item, moved, f"pulling {plural(behind, 'commit')}", [])
-    return _decrypt(item, path, timeout, f"pulled {plural(behind, 'commit')}")
+    return _decrypt(item, ctx, git, timeout, f"pulled {plural(behind, 'commit')}")
 
 
-def _decrypt(item, path, timeout, done):
+def _decrypt(item, ctx, git, timeout, done):
+    path = git.path
+    memory = ctx.mem(item)
+    memory["decrypt_pending"] = git.rev("HEAD")
     decrypted = shell(item.get("decrypt"), cwd=path, timeout=timeout)
     if not decrypted.ok:
         return result(item, FAILED, f"{done}, but decrypting failed (exit {decrypted.code}); check that this machine's key can read it")
     checked = shell(item.get("check"), cwd=path, timeout=timeout)
     if not checked.ok:
         return result(item, FAILED, f"{done} and decrypted, but the check afterwards failed (exit {checked.code})")
+    memory.pop("decrypt_pending", None)
     return result(item, CHANGED, f"{done} and decrypted; its check passes")
 
 

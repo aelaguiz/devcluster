@@ -21,6 +21,10 @@ CLONE_TIMEOUT = 3600
 INSTALL_TIMEOUT = 1800
 ROUNDS = 3  # tries at pushing when origin keeps moving
 
+# A fast-forward that keeps what Git would otherwise replace without asking: an ignored
+# file in the way, and changes a configured autostash would set aside and reapply.
+FAST_FORWARD = ("merge", "--ff-only", "--quiet", "--no-overwrite-ignore", "--no-autostash")
+
 
 def sync_repo(item, ctx):
     path = expand(item.get("path"))
@@ -60,7 +64,10 @@ def sync_repo(item, ctx):
         if ahead == 0:
             if ctx.dry_run:
                 return result(item, WOULD_CHANGE, f"would pull {plural(behind, 'commit')} from origin" + _and_install(item))
-            moved = git.run("merge", "--ff-only", "--quiet", remote, timeout=MERGE_TIMEOUT)
+            switched = _switched(item, git, branch, done)
+            if switched:
+                return switched
+            moved = git.run(*FAST_FORWARD, remote, timeout=MERGE_TIMEOUT)
             if not moved.ok:
                 if _raced(moved):
                     continue
@@ -101,7 +108,10 @@ def sync_repo(item, ctx):
         made = git.run("commit-tree", tree, "-p", local, "-p", remote, "-m", message, timeout=120)
         if not made.ok:
             return result(item, FAILED, _prefix(done, f"couldn't make the merge commit: {made.first_line()}"), tail(made.err))
-        moved = git.run("merge", "--ff-only", "--quiet", made.out.strip(), timeout=MERGE_TIMEOUT)
+        switched = _switched(item, git, branch, done)
+        if switched:
+            return switched
+        moved = git.run(*FAST_FORWARD, made.out.strip(), timeout=MERGE_TIMEOUT)
         if not moved.ok:
             if _raced(moved):
                 continue
@@ -145,10 +155,11 @@ def sync_tool(item, ctx):
         return result(item, FAILED, f"origin has no branch, tag or commit called {ref}")
 
     head = git.rev("HEAD")
+    current = git.branch()
     memory = ctx.mem(item)
+    if branch_target and current not in (None, ref):
+        return result(item, BLOCKED, f"is checked out on {current}, not {ref}")
     if head == target:
-        if branch_target and git.branch() != ref:
-            return result(item, BLOCKED, f"is at the right commit but checked out on {git.branch() or 'a detached commit'}, not {ref}")
         memory["at"] = head
         return _after_update(item, ctx, git, done)
 
@@ -158,26 +169,22 @@ def sync_tool(item, ctx):
     if local:
         return result(item, BLOCKED, f"has {plural(local, 'commit')} that origin doesn't have; devcluster won't move it off them. If this machine is where it's edited, list it as a [[repo]] here")
 
-    forward = False
-    if branch_target:
-        current = git.branch()
-        if current != ref:
-            return result(item, BLOCKED, f"is checked out on {current or 'a detached commit'}, not {ref}")
-        forward = git.is_ancestor(head, target)
-        verb = "update" if forward else "move back"
-        if ctx.dry_run:
-            return result(item, WOULD_CHANGE, f"would {verb} from {short(head)} to {short(target)}" + _and_install(item))
-        if forward:
-            moved = git.run("merge", "--ff-only", "--quiet", target, timeout=MERGE_TIMEOUT)
-        else:
-            moved = git.run("reset", "--keep", "--quiet", target, timeout=MERGE_TIMEOUT)
+    forward = bool(branch_target) and current == ref and git.is_ancestor(head, target)
+    verb = "update" if forward else "move"
+    if ctx.dry_run:
+        return result(item, WOULD_CHANGE, f"would {verb} it from {short(head)} to {short(target)}" + _and_install(item))
+    if forward:
+        switched = _switched(item, git, ref, done)
+        if switched:
+            return switched
+        moved = git.run(*FAST_FORWARD, target, timeout=MERGE_TIMEOUT)
     else:
-        if ctx.dry_run:
-            return result(item, WOULD_CHANGE, f"would move from {short(head)} to {ref}" + _and_install(item))
-        moved = git.run("checkout", "--quiet", "--detach", target, timeout=MERGE_TIMEOUT)
+        # Going back, or to a pinned version, detaches at that commit instead of moving a
+        # branch, so no commit can be dropped, not even one an agent makes during the run.
+        moved = git.run("checkout", "--quiet", "--no-overwrite-ignore", "--detach", target, timeout=MERGE_TIMEOUT)
     if not moved.ok:
         return _update_failed(item, moved, f"moving it to {short(target)}", done)
-    done.append(f"{'updated' if branch_target and forward else 'moved'} from {short(head)}")
+    done.append(f"{verb}d from {short(head)}" if forward else f"moved from {short(head)}")
     memory["at"] = target
     return _after_update(item, ctx, git, done)
 
@@ -189,8 +196,13 @@ def _preflight(item, path, git):
     url = git.origin_url()
     if url is None:
         return result(item, BLOCKED, "has no origin remote")
-    if not same_remote(url, item.get("url")):
-        return result(item, BLOCKED, f"its origin is {url}, but the list says {item.get('url')}")
+    listed = item.get("url")
+    # Git may rewrite URLs (url.<base>.insteadOf), so compare the origin as written and as
+    # rewritten against the listed URL as written and as rewritten.
+    written = git.out("config", "--get", "remote.origin.url", timeout=60) or url
+    rewritten = git.out("ls-remote", "--get-url", listed, timeout=60) or listed
+    if not (same_remote(written, listed) or same_remote(url, rewritten)):
+        return result(item, BLOCKED, f"its origin is {written}, but the list says {listed}")
     operation = git.operation_in_progress()
     if operation:
         return result(item, BLOCKED, f"is in the middle of {operation}; devcluster won't touch it until that's finished")
@@ -224,6 +236,14 @@ def _after_update(item, ctx, git, done):
         memory.pop(key, None)
     memory["installed"] = head
     return result(item, CHANGED, f"{summary}; ran its install")
+
+
+def _switched(item, git, branch, done):
+    """Stop if someone switched the checkout to another branch during the run."""
+    current = git.branch()
+    if current == branch:
+        return None
+    return result(item, BLOCKED, _prefix(done, f"was switched to {current or 'a detached commit'} during the run, so devcluster stopped before changing it"))
 
 
 def _and_install(item):

@@ -74,7 +74,7 @@ A repo a machine only follows: it moves to `ref` and never pushes.
 | `install` | no | A command run in the checkout whenever its commit changes, and once on the first run |
 | `timeout`, `install_timeout` | no | As for a repo |
 
-A tool checkout with commits origin doesn't have is left alone. On a machine where you edit the tool, list it as a `[[repo]]` in that machine's file instead.
+A tool checkout with commits origin doesn't have is left alone. On a machine where you edit the tool, list it as a `[[repo]]` in that machine's file instead. Moving back, or to a pinned tag or commit, leaves the checkout detached at that commit: devcluster never moves a tool's branch backward.
 
 ### [[cli]]
 

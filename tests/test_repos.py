@@ -1,5 +1,6 @@
 """Repos worked on directly on main, synced both ways."""
 
+import shutil
 import textwrap
 
 from tests.fakes import ClusterTest, git
@@ -149,3 +150,60 @@ class RepoSync(ClusterTest):
         studio.sync()
         self.assertState(studio, "work", "would-change", "would clone")
         self.assertFalse(studio.path("workspace/work").exists())
+
+    def test_ignored_file_in_the_way_is_kept(self):
+        self.laptop.path("workspace/work/.git/info/exclude").write_text("local-notes.md\n")
+        self.laptop.path("workspace/work/local-notes.md").write_text("ignored, but mine\n")
+        self.world.commit("work", {"local-notes.md": "now tracked on origin\n"})
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "blocked")
+        self.assertEqual(self.laptop.path("workspace/work/local-notes.md").read_text(), "ignored, but mine\n")
+
+    def test_autostash_setting_does_not_change_what_happens(self):
+        self.laptop.git("workspace/work", "config", "merge.autostash", "true")
+        self.world.commit("work", {"notes.txt": "two\n"})
+        self.laptop.path("workspace/work/notes.txt").write_text("my unsaved edit\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "blocked", "would overwrite uncommitted changes in notes.txt")
+        self.assertEqual(self.laptop.path("workspace/work/notes.txt").read_text(), "my unsaved edit\n")
+        self.assertEqual(self.laptop.git("workspace/work", "stash", "list"), "")
+
+    def test_branch_switched_during_the_fetch_is_left_alone(self):
+        # A git wrapper switches the checkout to another branch right after the fetch,
+        # the way an agent might while a long fetch runs.
+        real = shutil.which("git")
+        wrapper = self.laptop.path("wrapped-bin")
+        wrapper.mkdir()
+        repo = self.laptop.path("workspace/work")
+        flag = self.laptop.path("switched")
+        (wrapper / "git").write_text(textwrap.dedent(f"""\
+            #!/bin/sh
+            "{real}" "$@"; code=$?
+            case " $* " in
+              *" -C {repo} fetch "*) [ -e "{flag}" ] || {{ touch "{flag}"; "{real}" -C "{repo}" checkout --quiet -b feature; }} ;;
+            esac
+            exit $code
+            """))
+        (wrapper / "git").chmod(0o755)
+        self.world.commit("work", {"README.md": "new\n"})
+        before = self.laptop.git("workspace/work", "rev-parse", "main")
+        path = f"{wrapper}:{self.laptop.env()['PATH']}"
+        self.laptop.sync(PATH=path)
+        self.assertState(self.laptop, "work", "blocked", "was switched to feature during the run")
+        self.assertEqual(self.laptop.git("workspace/work", "rev-parse", "main"), before)
+        self.assertEqual(self.laptop.git("workspace/work", "rev-parse", "feature"), before)
+
+    def test_url_rewrites_are_understood(self):
+        # The list names an SSH URL; this machine's Git rewrites it to where the repo really is.
+        listed = "git@github.example:you/work.git"
+        with open(self.laptop.path(".gitconfig"), "a") as config:
+            config.write(f'[url "{self.world.github}/"]\n\tinsteadOf = git@github.example:you/\n')
+        self.world.commit("config", {"cluster.toml": CLUSTER.format(url=listed)})
+        self.world.commit("work", {"README.md": "new\n"})
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "changed", "pulled 1 commit")
+        shutil.rmtree(self.laptop.path("workspace/work"))
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "changed", "cloned it")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "ok")

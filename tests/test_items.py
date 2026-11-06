@@ -83,10 +83,18 @@ class Tools(ClusterTest):
         git(checkout, "reset", "--quiet", "--hard", good)
         git(checkout, "push", "--quiet", "--force", "origin", "main")
         self.laptop.path("tools/skills/untracked.txt").write_text("keep me\n")
+        bad = self.laptop.git("tools/skills", "rev-parse", "main")
         self.laptop.sync()
-        self.assertState(self.laptop, "skills", "changed")
+        self.assertState(self.laptop, "skills", "changed", "moved from")
         self.assertEqual(self.laptop.git("tools/skills", "rev-parse", "HEAD"), good)
         self.assertEqual(self.laptop.path("tools/skills/untracked.txt").read_text(), "keep me\n")
+        # It detached at the good commit and left the branch where it was, so nothing on it is lost.
+        self.assertEqual(self.laptop.git("tools/skills", "rev-parse", "main"), bad)
+        self.assertEqual(self.laptop.git("tools/skills", "branch", "--show-current"), "")
+        self.world.commit("skills", {"skill.txt": "v3\n"})
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "changed", "ran its install")
+        self.assertEqual(self.laptop.path(".skills/skill.txt").read_text(), "v3\n")
 
 
 class Clis(ClusterTest):
@@ -160,6 +168,18 @@ class Secrets(ClusterTest):
         self.laptop.sync()
         self.assertState(self.laptop, "secrets", "changed", "pulled 1 commit and decrypted")
         self.assertEqual(self.laptop.path("secrets/local/new.env").read_text(), "NEW=1\n")
+
+    def test_a_failed_decrypt_is_retried(self):
+        self.laptop.path(".fail-decrypt").write_text("")
+        self.world.commit("secrets", {"encrypted/new.env.enc": base64.b64encode(b"NEW=1\n").decode()})
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "failed", "decrypting failed")
+        self.laptop.path(".fail-decrypt").unlink()
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "changed", "retried decrypting")
+        self.assertEqual(self.laptop.path("secrets/local/new.env").read_text(), "NEW=1\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "ok")
 
     def test_unpublished_local_edit_blocks_the_pull(self):
         before = self.laptop.git("secrets", "rev-parse", "HEAD")

@@ -3,6 +3,7 @@
 import re
 
 from .git import Git, short
+from .items.checkouts import FAST_FORWARD
 from .paths import engine_root
 from .proc import tail
 from .results import BLOCKED, BUSY, CHANGED, FAILED, OK, ItemResult, plural
@@ -29,7 +30,7 @@ def pull_config(layout):
         return _result("config", OK, f"up to date at {short(head)}")
     if not git.is_ancestor(head, remote):
         return _result("config", BLOCKED, f"the config checkout here has {plural(git.local_only('HEAD'), 'commit')} origin doesn't have; edit the config in its own checkout and push it")
-    moved = git.run("merge", "--ff-only", "--quiet", remote, timeout=300)
+    moved = git.run(*FAST_FORWARD, remote, timeout=300)
     if not moved.ok:
         return _result("config", BLOCKED, f"couldn't update the config checkout: {moved.first_line()}; using it as it is", tail(moved.err))
     return _result("config", CHANGED, f"updated from {short(head)} to {short(remote)}")
