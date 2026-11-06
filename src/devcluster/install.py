@@ -76,14 +76,16 @@ def _schedule(layout, interval, path):
         plist = _launchd_path()
         plist.parent.mkdir(parents=True, exist_ok=True)
         plist.write_bytes(launchd_plist(layout, interval, path))
-        domain = f"gui/{os.getuid()}"
-        run(["launchctl", "bootout", f"{domain}/{LABEL}"], timeout=30)
-        started = run(["launchctl", "bootstrap", domain, str(plist)], timeout=30)
-        if not started.ok:
-            started = run(["launchctl", "load", "-w", str(plist)], timeout=30)
-        if not started.ok:
-            return [f"Wrote {plist}, but launchd wouldn't start it: {started.first_line()}"]
-        return [f"Started the launchd timer ({plist.name}), every {interval} seconds."]
+        # The login session's domain when someone is logged in at the screen; otherwise
+        # the user's background domain, which exists over SSH on a Mac nobody is logged in to.
+        uid = os.getuid()
+        for domain in (f"gui/{uid}", f"user/{uid}"):
+            run(["launchctl", "bootout", f"{domain}/{LABEL}"], timeout=30)
+        for domain in (f"gui/{uid}", f"user/{uid}"):
+            started = run(["launchctl", "bootstrap", domain, str(plist)], timeout=30)
+            if started.ok:
+                return [f"Started the launchd timer ({plist.name}) in {domain}, every {interval} seconds."]
+        return [f"Wrote {plist}, but launchd wouldn't start it: {started.first_line()}"]
     if sys.platform.startswith("linux"):
         folder = _systemd_dir()
         folder.mkdir(parents=True, exist_ok=True)
@@ -107,7 +109,8 @@ def _unschedule():
     lines = []
     if sys.platform == "darwin":
         plist = _launchd_path()
-        run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], timeout=30)
+        for domain in (f"gui/{os.getuid()}", f"user/{os.getuid()}"):
+            run(["launchctl", "bootout", f"{domain}/{LABEL}"], timeout=30)
         if plist.exists():
             plist.unlink()
             lines.append(f"Stopped and removed {plist}.")
