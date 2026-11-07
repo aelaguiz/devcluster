@@ -63,6 +63,14 @@ class Tools(ClusterTest):
         self.laptop.sync()
         self.assertState(self.laptop, "skills", "blocked", "that origin doesn't have")
 
+    def test_identical_copy_in_a_tool_is_cleared(self):
+        self.start()
+        self.world.commit("skills", {"extra.txt": "x\n"})
+        self.laptop.path("tools/skills/extra.txt").write_text("x\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "changed", "after clearing 1 file here that was identical to the incoming one")
+        self.assertEqual(self.laptop.git("tools/skills", "status", "--porcelain"), "")
+
     def test_pinned_commit_moves_back_and_forward(self):
         first = self.world.head("skills")
         second = self.world.commit("skills", {"skill.txt": "v2\n"})
