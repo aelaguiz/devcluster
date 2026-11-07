@@ -16,6 +16,8 @@ Each machine keeps itself in sync. A timer on every machine runs `devcluster syn
 
 Each machine pushes a report of its run, so `devcluster status` on any machine shows what every machine did, what failed, and what needs a person. To change something everywhere, push a change to the list.
 
+When an item stays stuck, devcluster can hand it to an agent. It first saves everything local in that checkout to a branch, then starts the agent you name on that machine with a brief and [its instructions](skills/devcluster-fixer/SKILL.md). The next run checks the fix. A machine that stops reporting gets checked over SSH by its neighbour. You get a message only when a fix needs your hands. See [fixer.toml](docs/config.md#fixertoml).
+
 ## What's coming
 
 Putting heavy work on the machine with room for it, device claims that hold, cleanup that keeps disks from filling, and one consistent set of agent rules. [The architecture](docs/architecture.md) sets out the direction, and the [issues](https://github.com/aelaguiz/devcluster/issues) track the work.
@@ -48,6 +50,7 @@ That puts `devcluster` in `~/.local/bin` and starts the timer: launchd on macOS,
 
 - [The architecture](docs/architecture.md): where the whole project is going
 - [The sync engine plan](docs/plans/sync-engine.md): how sync works and how it's tested
+- [The fixer plan](docs/plans/fixer.md): the agent that fixes stuck items
 
 ## Tests
 

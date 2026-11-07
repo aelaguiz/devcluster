@@ -69,7 +69,9 @@ def git(cwd, *args, env=None, check=True):
 
 
 def base_env(home=None):
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "DEVCLUSTER_"))}
+    # INVOCATION_ID would make the engine start a fixer through systemd-run, as it does
+    # under the real timer; tests start it directly.
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "DEVCLUSTER_")) and k != "INVOCATION_ID"}
     env.update(GIT_CONFIG_NOSYSTEM="1", LC_ALL="C")
     if home:
         env["HOME"] = str(home)
@@ -129,7 +131,7 @@ class World:
             return str(bare)
         source = self.work / "engine"
         source.mkdir()
-        for part in ("bin", "src"):
+        for part in ("bin", "src", "skills"):
             shutil.copytree(ROOT / part, source / part, ignore=shutil.ignore_patterns("__pycache__"))
         git(source, "init", "--quiet", "--initial-branch=main")
         git(source, "add", "-A")

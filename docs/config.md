@@ -6,6 +6,7 @@ The config is a private Git repo. Every machine keeps a checkout of it in `~/.de
 cluster.toml          what every machine gets
 machines/NAME.toml    one file per machine; the file name is the machine's name
 files/                files that [[file]] items put in place
+fixer.toml            optional: the agent that fixes stuck items, and how to reach you
 ```
 
 Check a config before you push it:
@@ -131,3 +132,28 @@ devcluster copies the file and remembers what it wrote. A target edited on the m
 | `skip` | none | Names of items in cluster.toml that don't apply here |
 
 A machine file can also hold `[secrets]`, `[[repo]]`, `[[tool]]`, `[[cli]]` and `[[file]]` items. An item with the same name as a shared one replaces it on this machine. Any other item is added. `on` has no meaning in a machine file.
+
+## fixer.toml
+
+When an item stays stuck, devcluster saves everything local in it to a branch and starts an agent on that machine to fix it. A machine that stops reporting gets checked over SSH by the next machine in the list. You hear about it only when a fix needs your hands. [The fixer plan](plans/fixer.md) explains how it works, and the agent's instructions are [skills/devcluster-fixer](../skills/devcluster-fixer/SKILL.md).
+
+Without this file, or without `command`, nothing here happens and stuck items wait for you. It is a file of its own so a machine still on an older engine ignores it rather than stopping on a setting it doesn't know.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `command` | none | The agent to start. It runs through `/bin/sh` with the brief on standard input, in the stuck checkout. It must run unattended and exit when done. |
+| `notify` | none | How to reach you. It runs through `/bin/sh` with the message on standard input; `$DEVCLUSTER_SUBJECT` holds a subject line and `$DEVCLUSTER_MESSAGE` the path of a file holding the message. Without it, problems show only in `devcluster status`. |
+| `timeout` | `1800` | Seconds the agent may run before it is stopped |
+| `wait` | `1800` | Seconds before trying again when the agent says someone is still working there. It doubles each time, up to four hours. |
+| `failed_after` | `1800` | Seconds an item may keep failing before the agent looks at it. An item that needs you is handed over on its second run. |
+| `quiet_after` | `1200` | Seconds without a report before the next machine checks on it |
+
+Each `[machines.NAME]` table holds what is particular to one machine:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ssh` | none | How the next machine reaches it, such as `you@server.local` |
+| `watched` | `true` | `false` for a machine that is often off or asleep, such as a laptop, so its silence isn't reported |
+| any setting above | | Overrides that setting on this machine |
+
+One agent runs on a machine at a time, and none runs on a machine in dry run or for an item in dry run. Each run's brief, the agent's output and its result are kept in `~/.devcluster/state/fixer/`, and the messages sent are in `~/.devcluster/state/fixer/messages/`.

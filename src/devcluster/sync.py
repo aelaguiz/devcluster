@@ -9,7 +9,7 @@ import sys
 import traceback
 from dataclasses import replace
 
-from . import __version__, config as configs, status
+from . import __version__, config as configs, fixer as fixers, status
 from .context import Context
 from .engine import engine_commit, pull_config, update_engine
 from .git import Git, version_text
@@ -98,14 +98,24 @@ def run(dry_run=False, only=None, publish=True, quiet=False, argv=None):
         dry = dry_run or config.machines[machine].mode != "on"
         context = Context(machine, dry, config, now(), memory, layout.root)
         trial = replace(context, dry_run=True)  # for an item tried in dry run on a machine that's on
-        for item in config.plan(machine):
+        fixer, fixing = _fixer(layout, context, config, machine, results, preview=dry_run)
+        plan = config.plan(machine)
+        for item in plan:
             if only and item.name not in only:
+                continue
+            if f"{item.kind}:{item.name}" in fixing:
+                results.append(fixing[f"{item.kind}:{item.name}"])  # an agent is working on it
                 continue
             try:
                 outcome = HANDLERS[item.kind](item, trial if item.get("mode") == "dry-run" else context)
             except Exception:
                 outcome = ItemResult(item.kind, item.name, FAILED, "devcluster hit an internal error on this item", tail(traceback.format_exc()))
             results.append(outcome)
+        if fixer is not None and not dry and not only:
+            try:
+                results += fixer.after(plan, results)
+            except Exception:
+                results.append(ItemResult("fixer", machine, FAILED, "devcluster hit an internal error in its fixer", tail(traceback.format_exc())))
         _save_json(layout.state / "items.json", memory)
 
     report["mode"] = "dry-run" if dry else "on"
@@ -133,6 +143,22 @@ def run(dry_run=False, only=None, publish=True, quiet=False, argv=None):
     if report["errors"]:
         return 2
     return 1 if any(r.state in (FAILED, BLOCKED) for r in results) else 0
+
+
+def _fixer(layout, context, config, machine, results, preview=False):
+    """The fixer for this run, and the items an agent is fixing. With fixer.toml naming no
+    command it starts nothing, but an agent already running is still seen through."""
+    chosen = fixers.settings(config, machine)
+    if chosen is None:
+        if not (context.memory.get("fixer") or {}).get("running"):
+            return None, {}
+        chosen = dict(fixers.DEFAULTS)
+    fixer = fixers.Fixer(layout, context, config, machine, chosen, persist=lambda: _save_json(layout.state / "items.json", context.memory))
+    try:
+        return fixer, fixer.check(dry_run=preview)
+    except Exception:
+        results.append(ItemResult("fixer", machine, FAILED, "devcluster hit an internal error in its fixer", tail(traceback.format_exc())))
+        return None, {}
 
 
 def _append_log(layout, line):

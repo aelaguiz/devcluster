@@ -1,0 +1,17 @@
+# The agent devcluster starts when an item stays stuck, and how it reaches you.
+# The reference is docs/config.md in the devcluster repo.
+
+# It reads the brief on standard input, works in the stuck checkout, and must exit when done.
+command = "claude -p --model opus --effort medium --permission-mode bypassPermissions"
+
+# Gets the message on standard input. $DEVCLUSTER_SUBJECT is a subject line.
+notify = 'mail -s "$DEVCLUSTER_SUBJECT" you@example.com'
+
+timeout = 1800
+
+[machines.server]
+ssh = "you@server.local"
+
+[machines.laptop]
+ssh = "you@laptop.local"
+watched = false  # often asleep, so its silence isn't news
