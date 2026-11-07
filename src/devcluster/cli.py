@@ -47,7 +47,8 @@ def _check_config(args):
         print(f"\n{name} ({mode}):")
         for item in loaded.plan(name):
             where = item.get("path") or ", ".join(item.get("targets", [])) or item.get("version", "")
-            print(f"  {item.kind} {item.name}: {where}")
+            trial = " (tried in dry run)" if item.get("mode") == "dry-run" and machine.mode == "on" else ""
+            print(f"  {item.kind} {item.name}: {where}{trial}")
     return 0
 
 

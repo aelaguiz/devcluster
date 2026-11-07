@@ -10,11 +10,12 @@ NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # The order a run works through the kinds: credentials first, since installs may need them.
 KINDS = ("secrets", "repo", "tool", "cli", "file")
 
-_COMMON = {"name", "on"}
+_COMMON = {"name", "on", "mode"}
+_INSTALLED = {"install", "check", "installs_into", "install_timeout"}
 FIELDS = {
     "secrets": ({"path", "url", "check", "decrypt"}, {"branch", "timeout"}),
-    "repo": ({"path", "url"}, {"branch", "install", "timeout", "install_timeout"}),
-    "tool": ({"path", "url"}, {"ref", "install", "timeout", "install_timeout"}),
+    "repo": ({"path", "url"}, {"branch", "timeout"} | _INSTALLED),
+    "tool": ({"path", "url"}, {"ref", "timeout"} | _INSTALLED),
     "cli": ({"name", "version", "check", "install"}, {"timeout", "install_timeout"}),
     "file": ({"name", "source", "targets"}, set()),
 }
@@ -195,13 +196,22 @@ def _item(kind, entry, source, root, machine_names, errors, shared):
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 errors.append(f"{where}: {key} must be a whole number of seconds")
                 ok = False
-        elif key in ("on", "targets"):
+        elif key in ("on", "targets", "installs_into"):
             if not isinstance(value, list) or not value or not all(isinstance(v, str) and v for v in value):
                 errors.append(f"{where}: {key} must be a list of names")
                 ok = False
         elif not isinstance(value, str) or not value.strip():
             errors.append(f"{where}: {key} must be text")
             ok = False
+    if "mode" in entry and entry["mode"] not in MODES:
+        errors.append(f"{where}: mode must be \"dry-run\" or \"on\"")
+        ok = False
+    if entry.get("check") and not entry.get("install") and kind in ("repo", "tool"):
+        errors.append(f"{where}: check runs after the install, so it needs an install")
+        ok = False
+    if entry.get("installs_into") and not entry.get("install"):
+        errors.append(f"{where}: installs_into says where the install writes, so it needs an install")
+        ok = False
     if not ok:
         return None
     if "on" in entry:

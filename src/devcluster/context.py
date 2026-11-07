@@ -1,6 +1,7 @@
 """What every item handler needs to know about the run it's part of."""
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .results import ItemResult
 
@@ -12,6 +13,7 @@ class Context:
     config: object
     now: float
     memory: dict = field(default_factory=dict)
+    root: Path = None  # this machine's devcluster folder: kept/ and state/ are inside it
 
     def mem(self, item):
         """What this machine remembers about one item between runs."""
