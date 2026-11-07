@@ -17,6 +17,11 @@ from tests.test_engine import write_config
 INSTALL = textwrap.dedent('''\
     #!/bin/sh
     set -e
+    if [ -e "$HOME/.agent-writes" ]; then
+        # Stands in for another agent writing into the shared folder while the install runs.
+        n=$(( $(cat "$HOME/.agent-count" 2>/dev/null || echo 0) + 1 )); echo $n > "$HOME/.agent-count"
+        mkdir -p "$HOME/.skills" && echo "theirs $n" > "$HOME/.skills/theirs.txt"
+    fi
     [ ! -e "$HOME/.fail-install" ] || { echo "told to fail" >&2; exit 9; }
     rm -rf "$HOME/.skills/demo"
     mkdir -p "$HOME/.skills/demo"
@@ -207,6 +212,32 @@ class Installs(ClusterTest):
         self.laptop.sync()
         self.assertState(self.laptop, "skills", "failed", f"went back to {good[:7]}, its last good commit, and installed it again")
         self.assertEqual(self.head(), good)
+
+    def test_files_moved_aside_by_two_failures_in_the_same_second_are_all_kept(self):
+        self.start()
+        self.world.commit("skills", {"check.sh": BROKEN_CHECK})
+        # The new commit's install fails, then so does the good commit's, in the same run, and
+        # another agent's file appears in the shared folder during each.
+        self.laptop.path(".fail-install").write_text("")
+        self.laptop.path(".agent-writes").write_text("")
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "failed", "there too")
+        aside = sorted(p.read_text() for p in self.laptop.path(".devcluster/state/removed/skills").rglob("theirs.txt"))
+        self.assertEqual(aside, ["theirs 1\n", "theirs 2\n"])
+
+    def test_a_tool_whose_install_is_removed_while_it_recovers_just_syncs(self):
+        self.start()
+        self.world.commit("skills", {"check.sh": BROKEN_CHECK})
+        self.laptop.path(".fail-install").write_text("")
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "failed", "there too")
+        config = self.world.work / "config" / "cluster.toml"
+        text = config.read_text()
+        for line in ('install = "sh install.sh"\n', 'check = "sh check.sh"\n', 'installs_into = ["~/.skills"]\n'):
+            text = text.replace(line, "")
+        self.world.commit("config", {"cluster.toml": text})
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "changed", "moved from")
 
     def test_installing_the_good_commit_again_is_retried_until_it_works(self):
         self.start()

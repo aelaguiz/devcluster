@@ -176,7 +176,7 @@ def sync_tool(item, ctx):
     if branch_target and current not in (None, ref):
         return result(item, BLOCKED, f"is checked out on {current}, not {ref}")
     good = memory.get("good")
-    if memory.get("failed") == target and _waiting(ctx, memory) and good not in (None, target) and head in (target, good):
+    if item.get("install") and memory.get("failed") == target and _waiting(ctx, memory) and good not in (None, target) and head in (target, good):
         return _while_failed(item, ctx, git, head, target, good)
     if head == target:
         memory["at"] = head

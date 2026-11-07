@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -185,8 +186,16 @@ def kept_note(ctx, item):
     return f"{said}. Move the edits into the repo, then delete that folder"
 
 
+def _new_folder(parent, now):
+    """A folder of its own under parent, named for the time: two in the same second never share one."""
+    parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=time.strftime("%Y-%m-%d-%H%M%S-", time.localtime(now)), dir=parent))
+
+
 def _keep(ctx, item, paths):
-    folder = _folder(ctx, "kept", item) / time.strftime("%Y-%m-%d-%H%M%S", time.localtime(ctx.now))
+    if not paths:
+        return _folder(ctx, "kept", item) / "none"
+    folder = _new_folder(_folder(ctx, "kept", item), ctx.now)
     for path in paths:
         _copy(path, folder / _inside(path))
     return folder
@@ -278,9 +287,10 @@ def run(item, ctx, cwd):
     folders = roots(item)
     aside = _folder(ctx, "state/removed", item)
     _forget_old(aside, ctx.now)
-    stamp = aside / time.strftime("%Y-%m-%d-%H%M%S", time.localtime(ctx.now))
+    stamp = None
     for path in sorted(written - set(before), key=len, reverse=True):
         if os.path.lexists(path) and not (os.path.isdir(path) and not os.path.islink(path)) and not _through_link(path, folders):
+            stamp = stamp or _new_folder(aside, ctx.now)
             target = stamp / _inside(path)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(path, target)
