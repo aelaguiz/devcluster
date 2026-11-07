@@ -41,6 +41,8 @@ path = "~/workspace/secrets"
 url = "git@github.com:you/secrets.git"
 check = "./bin/secrets check"
 decrypt = "./bin/secrets decrypt"
+# With a publish command, this machine's changes are encrypted, committed and pushed too.
+# publish = "./bin/secrets publish"
 
 # A file from this repo, put in place on every machine.
 [[file]]

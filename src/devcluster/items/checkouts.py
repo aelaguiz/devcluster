@@ -57,6 +57,16 @@ def sync_repo(item, ctx):
         return result(item, BLOCKED, f"is checked out on {current or 'a detached commit'}, not {branch}; devcluster syncs {branch} only while it's checked out")
 
     done = []
+    stopped = exchange(item, ctx, git, branch, timeout, done)
+    if stopped:
+        return stopped
+    return _after_update(item, ctx, git, done)
+
+
+def exchange(item, ctx, git, branch, timeout, done):
+    """Bring the checked-out branch and origin level, both ways: pull what origin has, push
+    what this machine has, and merge them when both have commits and the merge is clean. Adds
+    what it did to done. Returns a result when the run stops here, otherwise None."""
     for _ in range(ROUNDS):
         fetched = git.run("fetch", "--quiet", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}", timeout=timeout)
         if not fetched.ok:
@@ -136,8 +146,7 @@ def sync_repo(item, ctx):
         # The next round pushes the merge.
     else:
         return result(item, FAILED, _prefix(done, "origin kept moving while devcluster pushed; the next run tries again"))
-
-    return _after_update(item, ctx, git, done)
+    return None
 
 
 def sync_tool(item, ctx):

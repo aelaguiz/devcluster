@@ -39,7 +39,7 @@ Paths can start with `~`, which means the home folder of whoever runs devcluster
 
 ### [secrets]
 
-A Git repo of encrypted secrets, with its own commands to check and decrypt them. There's at most one.
+A Git repo of encrypted secrets, with its own commands to check, decrypt and publish them. There's at most one.
 
 | Field | Required | Meaning |
 |---|---|---|
@@ -47,10 +47,15 @@ A Git repo of encrypted secrets, with its own commands to check and decrypt them
 | `url` | yes | Its origin |
 | `check` | yes | A command, run in the checkout, that succeeds when the decrypted files match the encrypted ones |
 | `decrypt` | yes | A command, run in the checkout, that writes the decrypted files |
+| `publish` | no | A command, run in the checkout, that encrypts what changed on this machine into the files Git tracks. With it, the repo syncs both ways |
 | `branch` | no | Defaults to `main` |
 | `timeout` | no | Seconds for each command, default 600 |
 
-A run checks first. If the check fails, this machine may have an edit nobody published, so the run stops there. Otherwise it fast-forwards, decrypts and checks again. If the decrypt fails, the next run retries it, unless a decrypted file has changed since. Neither command's output is recorded.
+Without `publish`, the repo only comes in. A run checks first. If the check fails, this machine may have an edit nobody published, so the run stops there. Otherwise it fast-forwards, decrypts and checks again.
+
+With `publish`, this machine's changes go out too. A run publishes, commits every change Git sees (within the repo's own ignore rules), and checks. If the check still fails, the publish missed an edit, so the run stops before pulling anything over it. Otherwise it pulls, pushes and merges with origin the way a [[repo]] does, and decrypts and checks again when origin's commits came in. When this machine and origin changed the same file, the merge conflicts and the run stops with that file named, changing nothing, so the fixer or a person can merge the two versions.
+
+Either way, if the decrypt fails, the next run retries it, unless a decrypted file has changed since, and nothing is published until a decrypt succeeds. No command's output is recorded.
 
 ### [[repo]]
 

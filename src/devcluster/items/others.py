@@ -9,8 +9,8 @@ from ..context import result
 from ..git import Git, clone
 from ..paths import clock, expand
 from ..proc import shell, tail
-from ..results import BLOCKED, CHANGED, FAILED, OK, WOULD_CHANGE, plural
-from .checkouts import CLONE_TIMEOUT, FAST_FORWARD, FETCH_TIMEOUT, _cleared, _preflight, _update_failed, update
+from ..results import BLOCKED, BUSY, CHANGED, FAILED, OK, WOULD_CHANGE, plural
+from .checkouts import CLONE_TIMEOUT, FAST_FORWARD, FETCH_TIMEOUT, _cleared, _prefix, _preflight, _update_failed, exchange, update
 
 CHECK_TIMEOUT = 60
 CLI_INSTALL_TIMEOUT = 1200
@@ -76,7 +76,7 @@ def sync_secrets(item, ctx):
             return result(item, FAILED, f"couldn't clone it: {cloned.first_line()}")
         return _decrypt(item, ctx, Git(path), timeout, "cloned it")
 
-    git = Git(path)
+    git = Git(path, ctx.identity())
     problem = _preflight(item, path, git)
     if problem:
         return problem
@@ -89,7 +89,9 @@ def sync_secrets(item, ctx):
     if retrying:
         if _plaintext(git) != memory.get("plaintext"):
             return result(item, BLOCKED, "a decrypt failed on an earlier run, and a decrypted file here has changed since, so devcluster won't decrypt over it. Run the check by hand to see which file")
-    else:
+    if item.get("publish"):
+        return _both_ways(item, ctx, git, branch, timeout, retrying)
+    if not retrying:
         checked = shell(item.get("check"), cwd=path, timeout=timeout)
         if not checked.ok:
             return result(item, BLOCKED, f"its check failed here (exit {checked.code}): this machine may have a credential edit nobody has published. Run the check by hand to see which file")
@@ -113,6 +115,81 @@ def sync_secrets(item, ctx):
     if not moved.ok:
         return _update_failed(item, moved, f"pulling {plural(behind, 'commit')}", [], git, remote)
     return _decrypt(item, ctx, git, timeout, f"pulled {plural(behind, 'commit')}" + _cleared(cleared))
+
+
+def _both_ways(item, ctx, git, branch, timeout, retrying):
+    """A secrets repo with a publish command also sends this machine's changes out: the command
+    writes them into the files Git tracks, devcluster commits them, exchanges commits with origin
+    the way it does for a repo, then decrypts whatever came in. After a failed decrypt nothing is
+    published until a decrypt succeeds, since the files here may be a mix of old and new."""
+    if ctx.dry_run:
+        return _would_both_ways(item, git, branch, timeout, retrying)
+    done = []
+    if not retrying:
+        published = shell(item.get("publish"), cwd=git.path, timeout=timeout)
+        if not published.ok:
+            how = "timed out" if published.timed_out else f"failed (exit {published.code})"
+            return result(item, FAILED, f"its publish command {how}; nothing was committed")
+        stopped = _commit(item, ctx, git, done)
+        if stopped:
+            return stopped
+        # Pulling decrypts over the files here, so anything the publish missed has to stop the run.
+        checked = shell(item.get("check"), cwd=git.path, timeout=timeout)
+        if not checked.ok:
+            return result(item, BLOCKED, _prefix(done, f"its check still fails after publishing (exit {checked.code}): this machine may have an edit the publish command didn't pick up, so devcluster stopped before pulling. Run the check by hand to see which file"))
+    before = git.rev("HEAD")
+    stopped = exchange(item, ctx, git, branch, FETCH_TIMEOUT, done)
+    if stopped:
+        return stopped
+    if retrying or git.rev("HEAD") != before:
+        return _decrypt(item, ctx, git, timeout, "; ".join(done) or "retried decrypting")
+    if done:
+        return result(item, CHANGED, "; ".join(done) + "; its check passes")
+    return result(item, OK, "up to date, and its check passes")
+
+
+def _commit(item, ctx, git, done):
+    """Commit every change Git sees after the publish, within the repo's own ignore rules.
+    Adds what it did to done. Returns a result when the run stops here, otherwise None."""
+    staged = git.run("add", "--all", timeout=600)
+    if staged.ok:
+        listed = git.run("diff", "--cached", "--name-only", "-z", timeout=120)
+        files = [name for name in listed.out.split("\0") if name] if listed.ok else []
+        if not files:
+            return None
+        message = f"Publish what changed on {ctx.machine}\n\nMade by devcluster sync."
+        staged = git.run("commit", "--quiet", "-m", message, timeout=300)
+        if staged.ok:
+            done.append(f"published {plural(len(files), 'changed file')}")
+            return None
+    if "index.lock" in staged.err + staged.out:
+        return result(item, BUSY, "another Git command was using it; the next run tries again")
+    return result(item, FAILED, f"couldn't commit what its publish command wrote: {staged.first_line()}", tail(staged.err + staged.out))
+
+
+def _would_both_ways(item, git, branch, timeout, retrying):
+    """What a run would do, without publishing, committing or decrypting anything."""
+    plans = []
+    if retrying:
+        plans.append("retry decrypting, which failed on an earlier run")
+    else:
+        checked = shell(item.get("check"), cwd=git.path, timeout=timeout)
+        if not checked.ok or git.out("status", "--porcelain", timeout=120):
+            plans.append("publish what changed on this machine")
+    fetched = git.run("fetch", "--quiet", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}", timeout=FETCH_TIMEOUT)
+    if not fetched.ok:
+        return result(item, FAILED, f"couldn't fetch from origin: {fetched.first_line()}")
+    head = git.rev("HEAD")
+    remote = git.rev(f"refs/remotes/origin/{branch}")
+    ahead = git.count(f"{remote}..{head}") if remote else git.count(head)
+    behind = git.count(f"{head}..{remote}") if remote else 0
+    if ahead:
+        plans.append(f"push {plural(ahead, 'commit')}")
+    if behind:
+        plans.append(f"pull {plural(behind, 'commit')} and decrypt")
+    if not plans:
+        return result(item, OK, "up to date, and its check passes")
+    return result(item, WOULD_CHANGE, "would " + ", then ".join(plans))
 
 
 def _plaintext(git):
