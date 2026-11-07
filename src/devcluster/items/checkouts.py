@@ -16,7 +16,7 @@ import time
 from ..context import result
 from ..git import Git, clone, git_version, same_remote, short, version_text
 from ..paths import clock, expand
-from ..proc import shell, tail
+from ..proc import run, shell, tail
 from ..results import BLOCKED, BUSY, CHANGED, FAILED, OK, WOULD_CHANGE, plural
 
 FETCH_TIMEOUT = 600
@@ -298,8 +298,9 @@ def _update_failed(item, moved, what, done, git=None, target=None):
     text = moved.err + moved.out
     files = _in_the_way(moved)
     if files:
-        kind = "untracked files" if "untracked working tree files" in text else "uncommitted changes"
-        differ = [name for name in files if not (git and _matching(git, target, name))] or files
+        differ = [name for name in files if not (git and _matching(git, target, name))] or list(files)
+        kinds = {kind for name, kind in files.items() if name in differ}
+        kind = " and ".join(k for k in ("uncommitted changes", "untracked files") if k in kinds)
         same = len(files) - len(differ)
         note = f" ({plural(same, 'more file')} in the way {'is' if same == 1 else 'are'} identical to the incoming {'one' if same == 1 else 'ones'})" if same else ""
         return result(item, BLOCKED, _prefix(done, f"{what} would overwrite {kind} in {_files(differ)}{note}; nothing was changed"), "\n".join(differ))
@@ -337,37 +338,70 @@ def update(git, command, target):
 
 
 def _in_the_way(moved):
-    """The files Git named when it refused to overwrite them."""
+    """The files Git named when it refused to overwrite them, each with what Git said it is:
+    an uncommitted change or an untracked file."""
     text = moved.err + moved.out
+    files, kind = {}, None
     if moved.ok or "would be overwritten" not in text:
-        return []
-    return [line.strip() for line in text.splitlines() if line.startswith("\t")]
+        return files
+    for line in text.splitlines():
+        if line.startswith("\t"):
+            if kind:
+                files[line[1:]] = kind
+        elif "would be overwritten" in line:
+            kind = "untracked files" if "untracked working tree files" in line else "uncommitted changes"
+        else:
+            kind = None
+    return files
 
 
 def _matching(git, target, name):
-    """The blob target has at this path when the file here holds exactly that, with the same
-    executable bit, and no third version of it is staged; otherwise None."""
+    """When the file here holds exactly the bytes the update would write at this path, with the
+    same executable bit, and no third version of it is staged: the target's blob, and the hash
+    of those bytes. Otherwise None."""
     path = git.path / name
     if path.is_symlink() or not path.is_file():
         return None
-    entry = git.out("ls-tree", target, "--", name, timeout=60)
-    if not entry or "\t" not in entry:
+    entry = _entry(git, target, name)
+    if not entry or entry[0] not in ("100644", "100755"):
         return None
-    mode, kind, blob = entry.split("\t", 1)[0].split()
-    if kind != "blob" or mode not in ("100644", "100755"):
-        return None
+    mode, blob = entry
     if (mode == "100755") != bool(path.stat().st_mode & 0o100):
         return None
-    if git.out("hash-object", "--", name, timeout=60) != blob:
+    # Compare raw bytes with what checkout would write, so a line-ending or filter
+    # conversion Git treats as the same file still counts as a difference.
+    written = run(["/bin/sh", "-c", 'git -C "$1" cat-file --filters "$2" | git hash-object --no-filters --stdin', "sh", str(git.path), f"{target}:{name}"], timeout=300, env=git.env)
+    raw = written.out.strip() if written.ok else None
+    if not raw or git.out("hash-object", "--no-filters", "--", name, timeout=300) != raw:
         return None
-    staged = git.out("ls-files", "--stage", "--", name, timeout=60)
-    if staged and staged.split()[1] not in (blob, _blob(git, f"HEAD:{name}")):
+    staged = _staged(git, name)
+    if staged and staged not in (entry, _entry(git, "HEAD", name)):
         return None
-    return blob
+    return blob, raw
 
 
-def _blob(git, spec):
-    return git.out("rev-parse", "--verify", "--quiet", spec, timeout=60)
+def _entry(git, tree, name):
+    """The mode and blob tree has at exactly this path, or None."""
+    listed = git.out("--literal-pathspecs", "ls-tree", "-z", "--full-tree", tree, "--", name, timeout=60)
+    for line in (listed or "").split("\0"):
+        info, _, path = line.partition("\t")
+        parts = info.split()
+        if path == name and len(parts) == 3 and parts[1] == "blob":
+            return parts[0], parts[2]
+    return None
+
+
+def _staged(git, name):
+    """The mode and blob staged at exactly this path, or None when nothing is. A conflicted
+    path counts as a third version."""
+    listed = git.out("--literal-pathspecs", "ls-files", "-z", "--stage", "--", name, timeout=60)
+    found = []
+    for line in (listed or "").split("\0"):
+        info, _, path = line.partition("\t")
+        parts = info.split()
+        if path == name and len(parts) == 3:
+            found.append((parts[0], parts[1]) if parts[2] == "0" else ("conflicted", parts[1]))
+    return found[0] if len(found) == 1 else (("conflicted", "") if found else None)
 
 
 def _clear(git, blobs, folder):
@@ -376,10 +410,11 @@ def _clear(git, blobs, folder):
     changed in the meantime. Returns what was staged and what was moved, or None after undoing
     both."""
     staged, moved = [], []
-    for name, blob in blobs.items():
-        if git.out("ls-files", "--", name, timeout=60):
-            if _blob(git, f":{name}") != blob:
-                if not git.run("add", "--sparse", "--", name, timeout=60).ok:
+    for name, (blob, raw) in blobs.items():
+        here = _staged(git, name)
+        if here:
+            if here[1] != blob:
+                if not git.run("--literal-pathspecs", "add", "--sparse", "--", name, timeout=60).ok:
                     _undo(git, staged, moved, folder)
                     return None
                 staged.append(name)
@@ -392,7 +427,7 @@ def _clear(git, blobs, folder):
             _undo(git, staged, moved, folder)
             return None
         moved.append((git.path / name, there))
-        if git.out("hash-object", f"--path={name}", "--", str(there), timeout=60) != blob:
+        if git.out("hash-object", "--no-filters", "--", str(there), timeout=300) != raw:
             _undo(git, staged, moved, folder)
             return None
     return staged, moved
@@ -402,7 +437,7 @@ def _undo(git, staged, moved, folder):
     """Put cleared files back as they were. A moved file goes back only where nothing has taken
     its place; if any can't, the folder holding it stays."""
     if staged:
-        git.run("reset", "--quiet", "--", *staged, timeout=60)
+        git.run("--literal-pathspecs", "reset", "--quiet", "--", *staged, timeout=60)
     kept = False
     for original, there in moved:
         try:

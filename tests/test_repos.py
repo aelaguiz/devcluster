@@ -104,6 +104,15 @@ class RepoSync(ClusterTest):
         self.assertEqual(self.laptop.path("workspace/work/same.txt").read_text(), "same\n")
         self.assertEqual(self.laptop.path("workspace/work/new.txt").read_text(), "mine\n")
 
+    def test_a_mix_of_kinds_is_named_by_kind(self):
+        self.world.commit("work", {"notes.txt": "two\n", "new.txt": "from origin\n"})
+        self.laptop.path("workspace/work/notes.txt").write_text("my unsaved edit\n")
+        self.laptop.path("workspace/work/new.txt").write_text("mine\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "blocked", "would overwrite uncommitted changes and untracked files in ")
+        self.assertEqual(self.laptop.path("workspace/work/notes.txt").read_text(), "my unsaved edit\n")
+        self.assertEqual(self.laptop.path("workspace/work/new.txt").read_text(), "mine\n")
+
     def test_a_staged_third_version_blocks(self):
         self.world.commit("work", {"notes.txt": "two\n"})
         self.laptop.path("workspace/work/notes.txt").write_text("staged\n")
@@ -113,6 +122,36 @@ class RepoSync(ClusterTest):
         self.assertState(self.laptop, "work", "blocked", "would overwrite uncommitted changes in notes.txt")
         self.assertEqual(self.laptop.git("workspace/work", "show", ":notes.txt"), "staged")
         self.assertEqual(self.laptop.path("workspace/work/notes.txt").read_text(), "two\n")
+
+    def test_a_staged_executable_bit_blocks(self):
+        self.world.commit("work", {"notes.txt": "two\n"})
+        self.laptop.git("workspace/work", "update-index", "--chmod=+x", "notes.txt")
+        self.laptop.path("workspace/work/notes.txt").write_text("two\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "blocked", "would overwrite uncommitted changes in notes.txt")
+        self.assertTrue(self.laptop.git("workspace/work", "ls-files", "--stage", "notes.txt").startswith("100755 "))
+
+    def test_different_line_endings_block(self):
+        self.laptop.git("workspace/work", "config", "core.autocrlf", "input")
+        self.world.commit("work", {"new.txt": "hello\n"})
+        self.laptop.path("workspace/work/new.txt").write_bytes(b"hello\r\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "blocked", "would overwrite untracked files in new.txt")
+        self.assertEqual(self.laptop.path("workspace/work/new.txt").read_bytes(), b"hello\r\n")
+
+    def test_a_name_with_brackets_is_not_a_pattern(self):
+        self.world.commit("work", {"pages/[id].txt": "a\n", "pages/i.txt": "one\n"})
+        self.laptop.sync()
+        new = self.world.commit("work", {"pages/[id].txt": "b\n"})
+        self.laptop.path("workspace/work/pages/[id].txt").write_text("b\n")
+        self.laptop.path("workspace/work/pages/i.txt").write_text("staged\n")
+        self.laptop.git("workspace/work", "add", "pages/i.txt")
+        self.laptop.path("workspace/work/pages/i.txt").write_text("not staged\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "changed", "after clearing 1 file")
+        self.assertEqual(self.laptop.git("workspace/work", "rev-parse", "HEAD"), new)
+        self.assertEqual(self.laptop.git("workspace/work", "show", ":pages/i.txt"), "staged")
+        self.assertEqual(self.laptop.path("workspace/work/pages/i.txt").read_text(), "not staged\n")
 
     def test_a_different_executable_bit_blocks(self):
         self.world.commit("work", {"new.txt": "x\n"})
@@ -125,7 +164,7 @@ class RepoSync(ClusterTest):
     def test_a_file_changed_while_it_is_cleared_is_put_back(self):
         repo = self.laptop.path("workspace/work")
         edit = f'for f in "{repo}"/.git/devcluster/cleared-*/new.txt; do echo changed > "$f"; done'
-        path = wrap_git(self.laptop, '*" hash-object --path=new.txt "*', before=edit)
+        path = wrap_git(self.laptop, '*" hash-object --no-filters -- "*/cleared-*', before=edit)
         before = self.laptop.git("workspace/work", "rev-parse", "HEAD")
         self.world.commit("work", {"new.txt": "from origin\n"})
         self.laptop.path("workspace/work/new.txt").write_text("from origin\n")
