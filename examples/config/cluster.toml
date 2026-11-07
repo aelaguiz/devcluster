@@ -23,6 +23,10 @@ path = "~/workspace/skills"
 url = "https://github.com/you/skills.git"
 ref = "main"
 install = "make install"
+# Proves the install works; when it fails, the tool goes back to its last good commit.
+check = "make verify_install"
+# Where the install writes: an installed file edited here is kept, not lost.
+installs_into = ["~/.claude/skills", "~/.agents/skills"]
 
 # A command-line tool pinned to one version.
 [[cli]]

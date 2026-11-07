@@ -7,6 +7,7 @@ import platform
 import socket
 import sys
 import traceback
+from dataclasses import replace
 
 from . import __version__, config as configs, fixer as fixers, status
 from .context import Context
@@ -95,7 +96,8 @@ def run(dry_run=False, only=None, publish=True, quiet=False, argv=None):
     memory = _load_json(layout.state / "items.json", {})
     if config is not None:
         dry = dry_run or config.machines[machine].mode != "on"
-        context = Context(machine, dry, config, now(), memory)
+        context = Context(machine, dry, config, now(), memory, layout.root)
+        trial = replace(context, dry_run=True)  # for an item tried in dry run on a machine that's on
         fixer, fixing = _fixer(layout, context, config, machine, results)
         plan = config.plan(machine)
         for item in plan:
@@ -105,7 +107,7 @@ def run(dry_run=False, only=None, publish=True, quiet=False, argv=None):
                 results.append(fixing[f"{item.kind}:{item.name}"])  # an agent is working on it
                 continue
             try:
-                outcome = HANDLERS[item.kind](item, context)
+                outcome = HANDLERS[item.kind](item, trial if item.get("mode") == "dry-run" else context)
             except Exception:
                 outcome = ItemResult(item.kind, item.name, FAILED, "devcluster hit an internal error on this item", tail(traceback.format_exc()))
             results.append(outcome)

@@ -6,6 +6,11 @@ A tool only follows: it moves to the ref the list names and never pushes.
 Nothing here force-pushes, rebases, or discards a change. Git's own refusal to
 overwrite uncommitted work is passed on as "Needs you", with the file names, unless every
 file in the way already holds exactly what the update would write there.
+
+When the commit changes, the item's install runs, then its check (see installs.py). If
+either fails, the files the install changed go back as they were, and a tool also goes
+back to the last commit that installed cleanly. A repo's checkout never goes back:
+people work in it.
 """
 
 import os
@@ -13,16 +18,16 @@ import re
 import shutil
 import time
 
+from .. import installs
 from ..context import result
 from ..git import Git, clone, git_version, same_remote, short, version_text
 from ..paths import clock, expand
-from ..proc import run, shell, tail
+from ..proc import run, tail
 from ..results import BLOCKED, BUSY, CHANGED, FAILED, OK, WOULD_CHANGE, plural
 
 FETCH_TIMEOUT = 600
 MERGE_TIMEOUT = 900
 CLONE_TIMEOUT = 3600
-INSTALL_TIMEOUT = 1800
 ROUNDS = 3  # tries at pushing when origin keeps moving
 
 # A fast-forward that keeps what Git would otherwise replace without asking: an ignored
@@ -37,7 +42,7 @@ def sync_repo(item, ctx):
 
     if not path.exists():
         if ctx.dry_run:
-            return result(item, WOULD_CHANGE, f"would clone {item.get('url')} into {item.get('path')}" + _and_install(item))
+            return result(item, WOULD_CHANGE, f"would clone {item.get('url')} into {item.get('path')}" + _and_install(item, ctx))
         cloned = clone(item.get("url"), path, branch, CLONE_TIMEOUT)
         if not cloned.ok:
             return result(item, FAILED, f"couldn't clone it: {cloned.first_line()}", tail(cloned.err))
@@ -67,7 +72,7 @@ def sync_repo(item, ctx):
 
         if ahead == 0:
             if ctx.dry_run:
-                return result(item, WOULD_CHANGE, f"would pull {plural(behind, 'commit')} from origin" + _and_install(item))
+                return result(item, WOULD_CHANGE, f"would pull {plural(behind, 'commit')} from origin" + _and_install(item, ctx))
             switched = _switched(item, git, branch, done)
             if switched:
                 return switched
@@ -109,7 +114,7 @@ def sync_repo(item, ctx):
         if not tested.ok:
             return result(item, FAILED, _prefix(done, f"couldn't test the merge: {tested.first_line()}"), tail(tested.err))
         if ctx.dry_run:
-            return result(item, WOULD_CHANGE, f"has {split}; would merge them (the merge is clean) and push" + _and_install(item))
+            return result(item, WOULD_CHANGE, f"has {split}; would merge them (the merge is clean) and push" + _and_install(item, ctx))
         tree = tested.out.split()[0]
         message = f"Merge origin/{branch} into {branch} on {ctx.machine}\n\nMade by devcluster sync."
         made = git.run("commit-tree", tree, "-p", local, "-p", remote, "-m", message, timeout=120)
@@ -143,7 +148,7 @@ def sync_tool(item, ctx):
 
     if not path.exists():
         if ctx.dry_run:
-            return result(item, WOULD_CHANGE, f"would clone {item.get('url')} into {item.get('path')} at {ref}" + _and_install(item))
+            return result(item, WOULD_CHANGE, f"would clone {item.get('url')} into {item.get('path')} at {ref}" + _and_install(item, ctx))
         pinned = re.fullmatch(r"[0-9a-fA-F]{7,40}", ref)
         cloned = clone(item.get("url"), path, None if pinned else ref, CLONE_TIMEOUT)
         if not cloned.ok:
@@ -170,9 +175,12 @@ def sync_tool(item, ctx):
     memory = ctx.mem(item)
     if branch_target and current not in (None, ref):
         return result(item, BLOCKED, f"is checked out on {current}, not {ref}")
+    good = memory.get("good")
+    if item.get("install") and memory.get("failed") == target and _waiting(ctx, memory) and good not in (None, target) and head in (target, good):
+        return _while_failed(item, ctx, git, head, target, good)
     if head == target:
         memory["at"] = head
-        return _after_update(item, ctx, git, done)
+        return _after_update(item, ctx, git, done, tool=True)
 
     # Commits origin doesn't have were made here, unless the checkout is still exactly
     # where devcluster last put it: then they came from origin before it was rewound.
@@ -183,7 +191,7 @@ def sync_tool(item, ctx):
     forward = bool(branch_target) and current == ref and git.is_ancestor(head, target)
     verb = "update" if forward else "move"
     if ctx.dry_run:
-        return result(item, WOULD_CHANGE, f"would {verb} it from {short(head)} to {short(target)}" + _and_install(item))
+        return result(item, WOULD_CHANGE, f"would {verb} it from {short(head)} to {short(target)}" + _and_install(item, ctx))
     if forward:
         switched = _switched(item, git, ref, done)
         if switched:
@@ -200,16 +208,23 @@ def sync_tool(item, ctx):
         if switched:
             return switched
     else:
-        # A commit made on a detached checkout in the moment before the move is reachable
-        # only from Git's log of where HEAD was. Keep it on a branch and say so.
-        before = git.rev("HEAD@{1}")
-        if before and before != head and not git.out("for-each-ref", "--contains", before, "refs/heads", timeout=60):
-            kept = f"devcluster-kept-{short(before)}"
-            git.run("branch", kept, before, timeout=60)
+        kept = _keep_stray_commit(git, head)
+        if kept:
             return result(item, BLOCKED, f"a commit was made here while devcluster moved it to {short(target)}; that commit is kept on branch {kept}")
     done.append((f"{verb}d from {short(head)}" if forward else f"moved from {short(head)}") + _cleared(cleared))
     memory["at"] = target
-    return _after_update(item, ctx, git, done)
+    return _after_update(item, ctx, git, done, tool=True)
+
+
+def _keep_stray_commit(git, head):
+    """After a detached move: a commit made on the detached checkout in the moment before the
+    move is reachable only from Git's log of where HEAD was. Keep it on a branch."""
+    before = git.rev("HEAD@{1}")
+    if before and before != head and not git.out("for-each-ref", "--contains", before, "refs/heads", timeout=60):
+        kept = f"devcluster-kept-{short(before)}"
+        git.run("branch", kept, before, timeout=60)
+        return kept
+    return None
 
 
 def _preflight(item, path, git):
@@ -234,31 +249,103 @@ def _preflight(item, path, git):
     return None
 
 
-def _after_update(item, ctx, git, done):
-    """Run the item's install when its commit has moved, then report."""
+def _after_update(item, ctx, git, done, tool=False):
+    """Run the item's install and check when its commit has moved, then report."""
     head = git.rev("HEAD")
     changed = bool(done)
     summary = "; ".join(done) + f"; now at {short(head)}" if done else f"up to date at {short(head)}"
     command = item.get("install")
     if not command:
-        return result(item, CHANGED if changed else OK, summary)
+        return _report(item, ctx, CHANGED if changed else OK, summary)
     memory = ctx.mem(item)
     if memory.get("installed") == head:
-        return result(item, CHANGED if changed else OK, summary)
-    if memory.get("failed") == head and ctx.now - memory.get("failed_at", 0) < ctx.retry_after:
+        return _report(item, ctx, CHANGED if changed else OK, summary)
+    if memory.get("failed") == head and _waiting(ctx, memory):
         retry = clock(memory["failed_at"] + ctx.retry_after)
-        return result(item, FAILED, f"{summary}; its install failed at {clock(memory['failed_at'])}, and is tried again after {retry}", memory.get("failure", ""))
+        step = memory.get("failed_step", "install")
+        return _report(item, ctx, FAILED, f"{summary}; its {step} failed at {clock(memory['failed_at'])}, and is tried again after {retry}", memory.get("failure", ""))
     if ctx.dry_run:
-        return result(item, WOULD_CHANGE, f"{summary}; would run its install")
-    ran = shell(command, cwd=git.path, timeout=item.get("install_timeout", INSTALL_TIMEOUT))
-    if not ran.ok:
-        how = "timed out" if ran.timed_out else f"exited {ran.code}"
-        memory.update(failed=head, failed_at=ctx.now, failure=tail(ran.err or ran.out))
-        return result(item, FAILED, f"{summary}; its install {how}", memory["failure"])
-    for key in ("failed", "failed_at", "failure"):
-        memory.pop(key, None)
-    memory["installed"] = head
-    return result(item, CHANGED, f"{summary}; ran its install")
+        return _report(item, ctx, WOULD_CHANGE, f"{summary}; would run its install{_keeping(item, ctx)}")
+
+    outcome = installs.run(item, ctx, git.path)
+    if outcome.ok:
+        for key in ("failed", "failed_at", "failed_step", "failure"):
+            memory.pop(key, None)
+        memory["installed"] = memory["good"] = head
+        checked = ", and its check passed" if item.get("check") else ""
+        return _report(item, ctx, CHANGED, f"{summary}; ran its install{checked}")
+
+    memory.update(failed=head, failed_at=ctx.now, failed_step=outcome.step, failure=outcome.output)
+    text = f"{summary}; its {outcome.step} {outcome.how}"
+    if outcome.restored:
+        text += "; the files it changed were put back"
+    good = memory.get("good")
+    if outcome.moved_aside:
+        added = "the file it added was" if outcome.moved_aside == 1 else f"the {outcome.moved_aside} files it added were"
+        text += f"; {added} moved to ~/.devcluster/state/removed/{item.name}"
+    if tool and good and good != head:
+        text += "; " + _go_back(item, ctx, git, good, head)
+    return _report(item, ctx, FAILED, text, outcome.output)
+
+
+def _go_back(item, ctx, git, good, failed):
+    """Return a tool from the commit whose install failed to its last good commit, and
+    install that again. Says what happened."""
+    memory = ctx.mem(item)
+    head = git.rev("HEAD")
+    if head != failed:
+        # Someone committed or moved the checkout while the install ran: leave their work be.
+        return f"its checkout moved to {short(head)} while the install ran, so devcluster left it there"
+    moved = git.run("checkout", "--quiet", "--no-overwrite-ignore", "--detach", good, timeout=MERGE_TIMEOUT)
+    if not moved.ok:
+        return f"couldn't go back to {short(good)}, its last good commit ({moved.first_line()}); the next run tries again"
+    kept = _keep_stray_commit(git, head)
+    memory["at"] = good
+    memory.pop("installed", None)
+    said = f"went back to {short(good)}, its last good commit"
+    if kept:
+        said += f" (a commit made here meanwhile is kept on branch {kept})"
+    return said + _install_good(item, ctx, git, good)
+
+
+def _install_good(item, ctx, git, good):
+    again = installs.run(item, ctx, git.path)
+    if again.ok:
+        ctx.mem(item)["installed"] = good
+        return ", and installed it again"
+    return f", but its {again.step} {again.how} there too; the next run tries again"
+
+
+def _while_failed(item, ctx, git, head, target, good):
+    """A tool whose newest commit failed, until that commit may be tried again: get back to
+    the last good commit and its install, or stay there."""
+    memory = ctx.mem(item)
+    step = memory.get("failed_step", "install")
+    waiting = f"{short(target)} failed its {step} at {clock(memory['failed_at'])}, and is tried again after {clock(memory['failed_at'] + ctx.retry_after)}"
+    failure = memory.get("failure", "")
+    if head == target:  # going back failed on an earlier run
+        if ctx.dry_run:
+            return _report(item, ctx, WOULD_CHANGE, f"{waiting}; would go back to {short(good)}, its last good commit")
+        return _report(item, ctx, FAILED, f"{waiting}; {_go_back(item, ctx, git, good, target)}", failure)
+    if memory.get("installed") != good:  # installing the good commit again failed on an earlier run
+        if ctx.dry_run:
+            return _report(item, ctx, WOULD_CHANGE, f"{waiting}; would install {short(good)}, its last good commit, again")
+        return _report(item, ctx, FAILED, f"{waiting}; stays on {short(good)}, its last good commit" + _install_good(item, ctx, git, good), failure)
+    return _report(item, ctx, FAILED, f"stays on {short(good)}, its last good commit: {waiting}", failure)
+
+
+def _waiting(ctx, memory):
+    return ctx.now - memory.get("failed_at", 0) < ctx.retry_after
+
+
+def _report(item, ctx, state, summary, detail=""):
+    """A result, plus edited install files kept aside: those need a person until dealt with."""
+    note = installs.kept_note(ctx, item)
+    if note:
+        summary = f"{summary}; {note}"
+        if state in (OK, CHANGED):
+            state = BLOCKED
+    return result(item, state, summary, detail)
 
 
 def _switched(item, git, branch, done, after=False):
@@ -272,8 +359,16 @@ def _switched(item, git, branch, done, after=False):
     return result(item, BLOCKED, _prefix(done, f"was switched to {current or 'a detached commit'} during the run, so devcluster stopped before changing it"))
 
 
-def _and_install(item):
-    return ", and run its install" if item.get("install") else ""
+def _and_install(item, ctx):
+    if not item.get("install"):
+        return ""
+    return ", and run its install" + _keeping(item, ctx)
+
+
+def _keeping(item, ctx):
+    """What a dry run adds when installed files were edited here since the last install."""
+    edits = installs.edited(item, ctx) if item.get("installs_into") else []
+    return f", keeping a copy of {plural(len(edits), 'installed file')} edited here" if edits else ""
 
 
 def _prefix(done, text):

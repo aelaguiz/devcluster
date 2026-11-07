@@ -2,7 +2,7 @@
 
 devcluster is for one person, or a small team, running coding agents across a handful of machines. It should feel like one computer. Work is current everywhere, every agent follows the same rules, heavy work lands where there's room, phones are taken in turn, and disks don't fill.
 
-This document is the direction for the whole project. The first piece, the sync engine, is planned in [plans/sync-engine.md](plans/sync-engine.md) and built. Everything else here is design, and each part names the issue that will build it.
+This document is the direction for the whole project. The first piece, the sync engine, is planned in [plans/sync-engine.md](plans/sync-engine.md) and built, and so are skills and tools ([plans/tools.md](plans/tools.md)). Everything else here is design, and each part names the issue that will build it.
 
 ## The picture
 
@@ -90,7 +90,7 @@ Reports grow as the parts below arrive: free space, load and memory for placemen
 | Issue | What it adds on top of the engine |
 |---|---|
 | [#2](https://github.com/aelaguiz/devcluster/issues/2) Repos on main | Proof on real machines that every commit reaches every awake machine within five minutes, and a quick way to see and resolve a conflict |
-| [#3](https://github.com/aelaguiz/devcluster/issues/3) Skills and tools | Detecting installed copies that were edited by hand, and keeping the previous version when an install fails partway |
+| [#3](https://github.com/aelaguiz/devcluster/issues/3) Skills and tools | A check after each install, keeping installed copies that were edited by hand, and going back to the last good version when an install fails ([plan](plans/tools.md)) |
 | [#4](https://github.com/aelaguiz/devcluster/issues/4) Credentials | Saying which tool needs which credential, so a missing one is named in the report. Some sign-ins can't be copied (a keychain, a browser profile), so those are reported as missing, never copied |
 | [#5](https://github.com/aelaguiz/devcluster/issues/5) CLI versions | Fetching an approved build from storage by its hash when the CLI isn't installed from a package manager |
 | [#6](https://github.com/aelaguiz/devcluster/issues/6) Rules files | The global agent instructions and the where-work-goes guide moved into `files/`, with every other copy retired |

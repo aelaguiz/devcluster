@@ -9,7 +9,7 @@ It is built for one person running coding agents (Claude Code, Codex and others)
 Each machine keeps itself in sync. A timer on every machine runs `devcluster sync` every two minutes. Each run reads one list in a private config repo and brings that machine in line with it:
 
 - **Repos worked on directly on `main`:** pulled, merged and pushed, both ways, without ever force-pushing or overwriting uncommitted work.
-- **Tools and skills:** kept at the branch, tag or commit the list names, and installed when that moves.
+- **Tools and skills:** kept at the branch, tag or commit the list names, and installed when that moves. A check after the install proves it works; a failed one goes back to the last good version, and an installed copy edited by hand is kept and reported, never lost.
 - **Command-line tools:** kept at one version.
 - **An encrypted secrets repo:** pulled and decrypted with its own commands.
 - **Files:** for example, the instructions every agent reads.

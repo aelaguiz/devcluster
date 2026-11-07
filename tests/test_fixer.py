@@ -263,6 +263,18 @@ class DryRun(FixerTest):
         self.assertEqual(self.runs(laptop), [])
 
 
+    def test_never_hands_off_an_item_tried_in_dry_run(self):
+        self.cluster(cluster=CLUSTER.format(url=self.url) + 'mode = "dry-run"\n')
+        laptop = self.world.machine("laptop")
+        git(laptop.home, "clone", "--quiet", self.url, str(laptop.path("workspace/work")), env=base_env(laptop.home))
+        self.block(laptop)
+        self.agent(laptop, ":")
+        for minute in range(0, 40, 2):
+            laptop.sync(now=T0 + minute * 60)
+        self.assertEqual(laptop.report()["mode"], "on")
+        self.assertEqual(self.runs(laptop), [])
+
+
 class Saving(FixerTest):
     """The save step on its own, on checkouts the engine itself didn't make."""
 
