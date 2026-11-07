@@ -53,19 +53,20 @@ Any item can say `mode = "dry-run"`. On a machine that syncs for real, that item
 
 `devcluster status --all` already lists every item on every machine with its commit ("up to date at 6ff64b6"). An item with kept edits shows under "Needs you" until they're dealt with.
 
-## The config for Amir's cluster
+## Using it for a set of agent tools
 
-| Tool | Kind | Machines | Install | Check |
-|---|---|---|---|---|
-| arch_skill | Repo, synced both ways: agents commit to it on several machines | All six | `make install` | `make verify_install` |
-| agent-email | Tool; a repo on the M5, where it's developed | All six; each already has its settings and service | Its install steps without the final Google login check | Skill copies match the repo, the command runs, the listener is running |
-| approvals | Repo on the M5 | The M5, the only machine with its Slack settings; Mini 1 gets only the command and skill | Its install steps without the final Slack check | Skill copies match the repo, the command runs, and on the M5 the listeners are running |
-| Amir MCP | Repo on the M5, tool on the home server | The M5 and home server, where it runs today | `scripts/install-service.sh`, which restarts it | The server answers on its local port |
-| AI Manager | Not in this rollout | | | |
+In the setup this project comes from, the tools fall into four kinds:
 
-**AI Manager isn't in this rollout.** Four machines (the home server, the M3 36 GB, the M3 Max and the Studio) run `aim` straight from their working checkout. That checkout is at the temporary release from the November 2 restore, 40 commits behind, with 22 to 24 uncommitted files. Moving them forward means installing the reviewed Claude runtime with administrator rights, and AI Manager's own README says that goes through its upgrade steps, not through a pull and an install. Once every machine runs a release with its runtime installed, AI Manager can follow a pinned commit, installed into a fixed release folder that's never the development checkout.
+| Kind of tool | Listed as | Install | Check |
+|---|---|---|---|
+| A skills repo agents commit to on several machines | `[[repo]]`, synced both ways | Its own `make install` | Its own verify target |
+| A command with a background service, developed on one machine | `[[tool]]`, and `[[repo]]` in that machine's file | Its install steps, without any sign-in check at the end | The skill copies match the repo, the command runs, the service is running |
+| A server that has to answer | `[[tool]]` | Its service install, which restarts it | It answers on its local port |
+| The launcher every agent session starts through | Not listed | | |
 
-Every check here runs only on the machine itself. agent-email's and approvals' own `make install` end with a login check against Google or Slack, so their installs list the steps before it.
+**A tool with its own upgrade procedure isn't listed.** A launcher whose new versions can need a reviewed runtime installed with administrator rights goes through its own upgrade steps, not a pull and an install. Once every machine runs a fixed release of it, it can be listed pinned to a commit and installed into a release folder that's never its development checkout.
+
+Every check runs only on the machine itself. Some tools' own install ends by signing in to every account they use, so their item lists the steps before that.
 
 ## Tests
 
@@ -81,12 +82,12 @@ On the fake cluster, as for #1:
 
 ## Trying it on real machines
 
-1. **Two machines first.** The config points the M5 and Mini 1 at the new engine version, through each machine's own `engine` setting. The other four keep the current version.
-2. **A canary tool.** The canary repo the repos rollout uses gets a tiny install script and check that write into `~/.devcluster/canary-installed`, and a second checkout of it is listed as a tool on the M5 and Mini 1. With it, on real machines:
-   - A commit pushed from the M5 is installed on Mini 1.
-   - A hand edit to the installed file on Mini 1 is kept and reported, and the next install goes ahead.
-   - A commit whose check fails rolls both machines back to the last good commit.
+1. **Two machines first.** The config points two machines at the new engine through each machine's own `engine` setting. An engine stops on a config field it doesn't know, and a config error stops every machine still on it. So once those two run cleanly, every machine moves to the new engine before the config uses `check`, `installs_into` or `mode`. With the config unchanged, the new engine does what the old one did.
+2. **A canary tool.** The canary repo gets a tiny install script and check that write into `~/.devcluster/canary-installed`, and a second checkout of it is listed as a tool on the two machines. With it, on real machines:
+   - A commit pushed from one machine is installed on the other.
+   - A hand edit to the installed file is kept and reported, and the install goes ahead.
+   - A commit whose check fails takes both machines back to the last good commit.
    - A fixed commit moves both forward again.
-3. **The real tools, in dry run, on the M5 and Mini 1.** Read what each would do, then switch them on, one at a time: agent-email, approvals, Amir MCP (the M5 only), then arch_skill.
-4. **The fleet.** The pull request is merged, `cluster.toml` names the merged version, and the two machine pins go. Each tool goes to the other four machines in dry run first, then on. `devcluster status --all` shows every tool at the same commit everywhere.
-5. **Retire the old rollouts.** Once arch_skill and agent-email are live everywhere, the publish skill's loop that logs in to each machine and pulls goes away, and so does agent-email's `scripts/rollout.sh`, except for setting up a new machine.
+3. **The real tools on the two machines,** in dry run first, then on, one at a time.
+4. **Everywhere.** The pull request is merged and `cluster.toml` names the merged version. Each tool goes to the other machines in dry run first, then on. `devcluster status --all` shows every tool at the same commit everywhere.
+5. **Retire the old rollouts:** the scripts that logged in to each machine to pull and install, except for setting up a new machine.
