@@ -14,18 +14,20 @@ The engine stays plain code. It still runs every two minutes, handles everything
 
 2. **The engine saves everything first.** Before any agent touches the checkout, plain code writes one commit holding all of it: local commits (they are the commit's ancestors), uncommitted edits, untracked files, and any ignored file Git named as in the way. It builds that commit from a copy of the index, so the working tree, the real index and the branch are untouched; copying the index keeps a sparse checkout's skip flags, so files outside the sparse folders are not recorded as deleted. It pushes the commit to `devcluster/saved/<machine>/<item>/<YYYYMMDD-HHMM>` on origin. When origin refuses it (a file over GitHub's 100 MB limit, a push over 2 GB), the branch stays local and the brief says so. A repo the engine hasn't cloned yet has nothing to save.
 
-3. **The engine starts the fixer.** It writes the brief to `state/fixer/<item>/brief.md` and runs the command the config names, with the brief on standard input, in the background so the timer keeps running. While the fixer works, the engine leaves that item alone and reports it as being fixed. One fixer runs on a machine at a time, with a time limit of 30 minutes by default. The command is the private config's choice, so the public engine names no agent or account:
+3. **The engine starts the fixer.** It writes the brief to a folder of its own under `state/fixer/`, and runs the command the config names, with the brief on standard input, in the background so the timer keeps running. On Linux the timer's service stops everything it started when the run ends, so there the fixer gets a systemd unit of its own; on macOS it gets its own session. While the fixer works, the engine leaves that item alone and reports it as being fixed. One fixer runs on a machine at a time, with a time limit of 30 minutes by default. The command is the private config's choice, so the public engine names no agent or account. It lives in `fixer.toml`, a file of its own, so a machine still on an engine from before the fixer ignores it instead of stopping on a section it doesn't know:
 
    ```toml
-   [fixer]
-   command = "claude -p --model opus --effort medium --permission-mode acceptEdits"
+   command = "claude -p --model opus --effort medium --permission-mode bypassPermissions"
    notify = "..."   # how to reach the owner; gets one message on standard input
    timeout = 1800
+
+   [machines.server]
+   ssh = "you@server.local"   # how a neighbour reaches it
    ```
 
 4. **The brief carries the case.** What the engine already knows, so the agent doesn't rediscover it: the machine and item, the repo's path, URL and branch, the stuck summary and Git's own output, when it got stuck, the saved branch and whether it reached origin, any process whose working folder is inside the checkout, when the newest local change was made, and where to write the result. It points the agent at the skill on disk, `~/.devcluster/engine/skills/devcluster-fixer/SKILL.md`.
 
-5. **The agent fixes it and says what it did.** The skill teaches the judgment: whose work this is, whether it is still live, what the repo wants on its branch, and how to finish. It writes `result.json` beside the brief:
+5. **The agent fixes it and says what it did.** The skill teaches the judgment: whose work this is, whether it is still live, what the repo wants on its branch, and how to finish. It writes `result.json` where the brief says:
 
    ```json
    {"outcome": "fixed", "summary": "one sentence for the status line", "details": "what it kept, what it set aside, and where"}
@@ -51,13 +53,14 @@ A few lines hold in every case. It never force-pushes or rewrites history that o
 
 The config names it. The suggestion is Opus at medium thinking: the brief and the repo carry the evidence, the engine's next run checks the result, and Opus at medium works through an odd case and says what it assumed instead of stopping. Codex's Sol at medium is the stand-in when the Claude accounts are short. The [backtest](#backtest) measures what one fix costs.
 
-## Building it, in order
+## Building it
 
-1. **The skill**, `skills/devcluster-fixer/`. Done in this change, and backtested once on a real case.
-2. **The save step**, in the engine, with tests: a sparse checkout, untracked and ignored files in the way, local commits, a push origin refuses.
-3. **Stuck tracking and the hand-off**: the fingerprint, the brief, the background run with its lock and time limit, reading `result.json`, the retry and message rules, and the new status line. Tested with a fake fixer command that edits the checkout the way an agent would.
-4. **Status and monitoring**: the agent's summary and the saved branch on the status page ([issue #14](https://github.com/aelaguiz/devcluster/issues/14)).
-5. **Machine mode**: the heartbeat watch, choosing the neighbour, SSH, and its part of the skill.
+All of it is built and tested, in [src/devcluster/fixer.py](../../src/devcluster/fixer.py) and [tests/test_fixer.py](../../tests/test_fixer.py):
+
+1. **The skill**, `skills/devcluster-fixer/`, backtested once on a real case (below).
+2. **The save step**: a sparse checkout records no deletions, ignored files in the way are kept, local commits are the saved commit's ancestors, and a push origin refuses leaves the branch on the machine and says so.
+3. **Stuck tracking and the hand-off**: the fingerprint, the brief, the background run and its time limit, reading `result.json`, the retry and message rules, and the status lines. The tests use a fake agent that edits the checkout the way an agent would.
+4. **Machine mode**: each run reads the other machines' reports, picks the neighbour, checks SSH, and starts the fixer or sends one message. An unreachable machine is checked again every ten minutes, so one that wakes without reporting still gets an agent.
 
 Each fix the agents keep making the same way is a candidate to move into the engine as plain code, the way identical copies were in [PR #15](https://github.com/aelaguiz/devcluster/pull/15).
 

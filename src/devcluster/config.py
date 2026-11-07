@@ -28,6 +28,22 @@ SETTINGS = {
 }
 MODES = ("dry-run", "on")
 
+# fixer.toml: the agent devcluster starts on a machine when an item stays stuck, how it reaches
+# the cluster's owner, and how a neighbour reaches each machine. It is its own file so an
+# engine from before the fixer ignores it instead of stopping on a section it doesn't know.
+FIXER = {
+    "command": str,       # run with the brief on standard input
+    "notify": str,        # gets the message on standard input; $DEVCLUSTER_SUBJECT names it
+    "timeout": int,       # seconds the fixer may run
+    "wait": int,          # seconds before trying again when the fixer says someone is working there
+    "failed_after": int,  # seconds an item may keep failing before the fixer looks at it
+    "quiet_after": int,   # seconds without a report before a neighbour checks the machine
+}
+FIXER_MACHINE = {
+    "ssh": str,       # how a neighbour reaches it when it stops reporting, such as user@host
+    "watched": bool,  # false for a machine that is often off or asleep, such as a laptop
+}
+
 
 class ConfigError(Exception):
     def __init__(self, errors):
@@ -63,6 +79,8 @@ class Config:
     settings: dict
     items: list
     machines: dict
+    fixer: dict = field(default_factory=dict)          # fixer.toml's settings
+    fixer_machines: dict = field(default_factory=dict)  # fixer.toml's [machines.NAME] tables
 
     def setting(self, key, default):
         return self.settings.get(key, default)
@@ -112,9 +130,11 @@ def load(root):
             continue
         machines[path.stem] = _machine(path.stem, data, root, shared_names, machine_names, errors)
 
+    fixer, fixer_machines = _fixer(root / "fixer.toml", machine_names, errors)
+
     if errors:
         raise ConfigError(errors)
-    return Config(root, settings, items, machines)
+    return Config(root, settings, items, machines, fixer, fixer_machines)
 
 
 def _read(path, errors, required=False):
@@ -143,6 +163,44 @@ def _settings(data, errors):
             errors.append(f"cluster.toml: unknown setting devcluster.{key}")
         elif not isinstance(value, expected) or isinstance(value, bool):
             errors.append(f"cluster.toml: devcluster.{key} must be a {expected.__name__}")
+    return dict(data)
+
+
+def _fixer(path, machine_names, errors):
+    data = _read(path, errors) if path.exists() else None
+    if data is None:
+        return {}, {}
+    machines = data.pop("machines", {})
+    settings = _fixer_settings(data, "fixer.toml", FIXER, errors)
+    if not isinstance(machines, dict):
+        errors.append("fixer.toml: write [machines.NAME] for each machine")
+        return settings, {}
+    chosen = {}
+    for name, entry in machines.items():
+        where = f"fixer.toml: machines.{name}"
+        if name not in machine_names:
+            errors.append(f"{where}: there is no machines/{name}.toml")
+            continue
+        if not isinstance(entry, dict):
+            errors.append(f"{where} must be a table")
+            continue
+        chosen[name] = _fixer_settings(entry, where, {**FIXER, **FIXER_MACHINE}, errors)
+    return settings, chosen
+
+
+def _fixer_settings(data, where, allowed, errors):
+    for key, value in data.items():
+        expected = allowed.get(key)
+        if expected is None:
+            errors.append(f"{where}: unknown setting {key!r}")
+        elif expected is bool:
+            if not isinstance(value, bool):
+                errors.append(f"{where}: {key} must be true or false")
+        elif expected is str:
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"{where}: {key} must be text")
+        elif not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            errors.append(f"{where}: {key} must be a whole number of seconds")
     return dict(data)
 
 

@@ -8,7 +8,7 @@ import socket
 import sys
 import traceback
 
-from . import __version__, config as configs, status
+from . import __version__, config as configs, fixer as fixers, status
 from .context import Context
 from .engine import engine_commit, pull_config, update_engine
 from .git import Git, version_text
@@ -96,14 +96,24 @@ def run(dry_run=False, only=None, publish=True, quiet=False, argv=None):
     if config is not None:
         dry = dry_run or config.machines[machine].mode != "on"
         context = Context(machine, dry, config, now(), memory)
-        for item in config.plan(machine):
+        fixer, fixing = _fixer(layout, context, config, machine, results)
+        plan = config.plan(machine)
+        for item in plan:
             if only and item.name not in only:
+                continue
+            if f"{item.kind}:{item.name}" in fixing:
+                results.append(fixing[f"{item.kind}:{item.name}"])  # an agent is working on it
                 continue
             try:
                 outcome = HANDLERS[item.kind](item, context)
             except Exception:
                 outcome = ItemResult(item.kind, item.name, FAILED, "devcluster hit an internal error on this item", tail(traceback.format_exc()))
             results.append(outcome)
+        if fixer is not None and not dry and not only:
+            try:
+                results += fixer.after(plan, results)
+            except Exception:
+                results.append(ItemResult("fixer", machine, FAILED, "devcluster hit an internal error in its fixer", tail(traceback.format_exc())))
         _save_json(layout.state / "items.json", memory)
 
     report["mode"] = "dry-run" if dry else "on"
@@ -131,6 +141,19 @@ def run(dry_run=False, only=None, publish=True, quiet=False, argv=None):
     if report["errors"]:
         return 2
     return 1 if any(r.state in (FAILED, BLOCKED) for r in results) else 0
+
+
+def _fixer(layout, context, config, machine, results):
+    """The fixer for this run, if fixer.toml names one, and the items an agent is fixing."""
+    chosen = fixers.settings(config, machine)
+    if chosen is None:
+        return None, {}
+    fixer = fixers.Fixer(layout, context, config, machine, chosen)
+    try:
+        return fixer, fixer.check()
+    except Exception:
+        results.append(ItemResult("fixer", machine, FAILED, "devcluster hit an internal error in its fixer", tail(traceback.format_exc())))
+        return None, {}
 
 
 def _append_log(layout, line):
