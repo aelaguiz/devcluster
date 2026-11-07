@@ -13,7 +13,7 @@ KINDS = ("secrets", "repo", "tool", "cli", "file")
 _COMMON = {"name", "on", "mode"}
 _INSTALLED = {"install", "check", "installs_into", "install_timeout"}
 FIELDS = {
-    "secrets": ({"path", "url", "check", "decrypt"}, {"branch", "timeout"}),
+    "secrets": ({"path", "url", "check", "decrypt"}, {"branch", "timeout", "publish"}),
     "repo": ({"path", "url"}, {"branch", "timeout"} | _INSTALLED),
     "tool": ({"path", "url"}, {"ref", "timeout"} | _INSTALLED),
     "cli": ({"name", "version", "check", "install"}, {"timeout", "install_timeout"}),

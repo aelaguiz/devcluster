@@ -229,6 +229,125 @@ class Secrets(ClusterTest):
         self.assertNoLeak()
 
 
+class PublishedSecrets(ClusterTest):
+    """A secrets repo with a publish command: this machine's edits go out, origin's come in."""
+
+    EDITED = f"TOKEN={SECRET_VALUE}-edited\n"
+
+    def setUp(self):
+        super().setUp()
+        encoded = base64.b64encode(f"TOKEN={SECRET_VALUE}\n".encode()).decode()
+        self.world.remote("secrets", {"bin/secrets": FAKE_SECRETS, "encrypted/app.env.enc": encoded, ".gitignore": "local/\n"})
+        self.world.config(self.cluster("./bin/secrets publish"), {"laptop": 'mode = "on"'})
+        self.laptop = self.world.machine("laptop")
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "changed", "cloned it and decrypted")
+
+    def cluster(self, publish):
+        return (
+            '[secrets]\npath = "~/secrets"\nurl = "' + str(self.world.github / "secrets.git") + '"\n'
+            f'check = "./bin/secrets check"\ndecrypt = "./bin/secrets decrypt"\npublish = "{publish}"\n'
+        )
+
+    def configure(self, publish):
+        self.world.commit("config", {"cluster.toml": self.cluster(publish)})
+
+    def origin_has(self, name, content):
+        shown = git(self.world.root, "--git-dir", str(self.world.github / "secrets.git"), "show", f"main:encrypted/{name}.enc")
+        return base64.b64decode(shown).decode() == content
+
+    def test_up_to_date_is_ok(self):
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "ok", "up to date, and its check passes")
+
+    def test_publishes_a_local_edit(self):
+        self.laptop.path("secrets/local/app.env").write_text(self.EDITED)
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "changed", "published 1 changed file; pushed 1 commit; its check passes")
+        self.assertTrue(self.origin_has("app.env", self.EDITED))
+        self.assertIn("Publish what changed on laptop", git(self.world.root, "--git-dir", str(self.world.github / "secrets.git"), "log", "-1", "--format=%B"))
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "ok")
+        self.assertNoLeak()
+
+    def test_pulls_and_decrypts_what_origin_has(self):
+        self.world.commit("secrets", {"encrypted/new.env.enc": base64.b64encode(b"NEW=1\n").decode()})
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "changed", "pulled 1 commit and decrypted; its check passes")
+        self.assertEqual(self.laptop.path("secrets/local/new.env").read_text(), "NEW=1\n")
+
+    def test_publishes_and_pulls_in_one_run(self):
+        self.laptop.path("secrets/local/app.env").write_text(self.EDITED)
+        self.world.commit("secrets", {"encrypted/new.env.enc": base64.b64encode(b"NEW=1\n").decode()})
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "changed", "published 1 changed file; merged 1 commit from origin; pushed 2 commits and decrypted")
+        self.assertTrue(self.origin_has("app.env", self.EDITED))
+        self.assertTrue(self.origin_has("new.env", "NEW=1\n"))
+        self.assertEqual(self.laptop.path("secrets/local/new.env").read_text(), "NEW=1\n")
+        self.assertEqual(self.laptop.path("secrets/local/app.env").read_text(), self.EDITED)
+
+    def test_the_same_file_changed_on_both_sides_blocks(self):
+        self.laptop.path("secrets/local/app.env").write_text(self.EDITED)
+        theirs = f"TOKEN={SECRET_VALUE}-rotated\n"
+        before = self.world.commit("secrets", {"encrypted/app.env.enc": base64.b64encode(theirs.encode()).decode()})
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "blocked", "merging them conflicts in encrypted/app.env.enc; nothing was changed")
+        self.assertEqual(self.laptop.item("secrets")["detail"], "encrypted/app.env.enc")
+        self.assertEqual(self.world.head("secrets"), before)
+        self.assertEqual(self.laptop.path("secrets/local/app.env").read_text(), self.EDITED)
+        self.assertNoLeak()
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "blocked", "conflicts in encrypted/app.env.enc")
+
+    def test_a_failed_publish_commits_nothing(self):
+        before = self.laptop.git("secrets", "rev-parse", "HEAD")
+        self.laptop.path("secrets/local/app.env").write_text(self.EDITED)
+        self.laptop.path(".fail-publish").write_text("")
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "failed", "its publish command failed (exit 1); nothing was committed")
+        self.assertEqual(self.laptop.git("secrets", "rev-parse", "HEAD"), before)
+        self.assertEqual(self.world.head("secrets"), before)
+        self.assertNoLeak()
+
+    def test_a_check_that_still_fails_after_publishing_stops_before_pulling(self):
+        self.configure("true")
+        before = self.laptop.git("secrets", "rev-parse", "HEAD")
+        self.laptop.path("secrets/local/app.env").write_text(self.EDITED)
+        self.world.commit("secrets", {"encrypted/new.env.enc": base64.b64encode(b"NEW=1\n").decode()})
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "blocked", "its check still fails after publishing")
+        self.assertEqual(self.laptop.git("secrets", "rev-parse", "HEAD"), before)
+        self.assertFalse(self.laptop.path("secrets/local/new.env").exists())
+        self.assertEqual(self.laptop.path("secrets/local/app.env").read_text(), self.EDITED)
+        self.assertNoLeak()
+
+    def test_dry_run_changes_nothing(self):
+        before = self.laptop.git("secrets", "rev-parse", "HEAD")
+        self.laptop.path("secrets/local/app.env").write_text(self.EDITED)
+        origin = self.world.commit("secrets", {"encrypted/new.env.enc": base64.b64encode(b"NEW=1\n").decode()})
+        self.laptop.sync("--dry-run")
+        self.assertState(self.laptop, "secrets", "would-change", "would publish what changed on this machine, then pull 1 commit and decrypt")
+        self.assertEqual(self.laptop.git("secrets", "rev-parse", "HEAD"), before)
+        self.assertEqual(self.world.head("secrets"), origin)
+        self.assertEqual(self.laptop.git("secrets", "status", "--porcelain"), "")
+        self.assertFalse(self.laptop.path("secrets/local/new.env").exists())
+        self.assertEqual(self.laptop.path("secrets/local/app.env").read_text(), self.EDITED)
+
+    def test_a_failed_decrypt_is_retried_before_anything_is_published(self):
+        self.laptop.path(".fail-decrypt").write_text("")
+        self.world.commit("secrets", {"encrypted/new.env.enc": base64.b64encode(b"NEW=1\n").decode()})
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "failed", "decrypting failed")
+        self.laptop.path(".fail-decrypt").unlink()
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "changed", "retried decrypting")
+        self.assertEqual(self.laptop.path("secrets/local/new.env").read_text(), "NEW=1\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "ok")
+
+    assertNoLeak = Secrets.assertNoLeak
+
+
 class Files(ClusterTest):
     def setUp(self):
         super().setUp()
