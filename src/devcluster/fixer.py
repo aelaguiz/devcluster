@@ -31,6 +31,9 @@ OUTCOMES = ("fixed", "waiting", "needs-owner", "could-not-fix")
 DEFAULTS = {"timeout": 1800, "wait": 1800, "failed_after": 1800, "quiet_after": 1200}
 NOTE_FOR = 24 * 3600     # how long a fixed item's status line says an agent fixed it
 MAX_WAITS = 6            # "someone is working there" this many times running, then the owner hears
+MAX_STARTS = 3           # the agent command ending at once without a result, then the owner hears
+QUICK = 120              # seconds; an agent that ends sooner without a result never got going
+NOT_TRIES = ("waiting", "no-start")
 SKILL = engine_root() / "skills" / "devcluster-fixer" / "SKILL.md"
 
 
@@ -85,11 +88,13 @@ class Fixer:
             minutes = round(self.settings["timeout"] / 60)
             outcome = {"outcome": "could-not-fix", "summary": f"the fixer ran out of time after {minutes} minutes", "details": _log_tail(running)}
         else:
-            outcome = _read_result(Path(running["dir"]) / "result.json") or {
-                "outcome": "could-not-fix",
-                "summary": "the fixer stopped without writing a result",
-                "details": _log_tail(running),
-            }
+            outcome = _read_result(Path(running["dir"]) / "result.json")
+            if outcome is None and _ran_for(running) < QUICK:
+                # A busy account, a rate limit or a network blip: the agent never got going,
+                # so this isn't a try, and the next run starts it again.
+                outcome = {"outcome": "no-start", "summary": "the agent command ended at once without a result", "details": _log_tail(running)}
+            elif outcome is None:
+                outcome = {"outcome": "could-not-fix", "summary": "the fixer stopped without writing a result", "details": _log_tail(running)}
         self._record(running, outcome)
         self.state["running"] = None
         return {}
@@ -188,10 +193,10 @@ class Fixer:
                 ready = self.now - episode["since"] >= self.settings["failed_after"]
             if not ready:
                 continue
-            tries = [a for a in episode["attempts"] if a["outcome"] != "waiting"]
+            tries = [a for a in episode["attempts"] if a["outcome"] not in NOT_TRIES]
             waits = [a for a in episode["attempts"] if a["outcome"] == "waiting"]
             owner = [a for a in tries if a["outcome"] == "needs-owner" and a["fp"] == episode["fp"]]
-            if owner or len(tries) >= 2 or (tries and tries[-1]["fp"] == episode["fp"]) or len(waits) >= MAX_WAITS:
+            if owner or len(tries) >= 2 or (tries and tries[-1]["fp"] == episode["fp"]) or len(waits) >= MAX_WAITS or _stalled(episode):
                 if self._notify_item(items[key], episode, owner[-1] if owner else None):
                     episode["notified"] = episode["fp"]
                 continue
@@ -246,7 +251,13 @@ class Fixer:
 
     def _notify_item(self, item, episode, owner_attempt):
         label = f"{item.kind} {item.name}"
-        lines = [f"{label} on {self.machine} has been stuck since {_when(episode['since'])}, and devcluster's fixer couldn't clear it.", ""]
+        if owner_attempt:
+            opening = f"The {label} on {self.machine} has been stuck since {_when(episode['since'])}. devcluster started an agent on it, and the fix needs you."
+        elif _stalled(episode):
+            opening = f"The {label} on {self.machine} has been stuck since {_when(episode['since'])}. devcluster tried {MAX_STARTS} times to start an agent on it, and the agent command ended at once each time."
+        else:
+            opening = f"The {label} on {self.machine} has been stuck since {_when(episode['since'])}. devcluster started an agent on it, and the agent couldn't fix it."
+        lines = [opening, ""]
         lines += ["What devcluster says:", f"  {episode['summary']}", ""]
         if owner_attempt and owner_attempt.get("message"):
             lines += ["What the agent needs from you:", f"  {owner_attempt['message']}", ""]
@@ -254,7 +265,12 @@ class Fixer:
         saved = next((a["saved"] for a in reversed(episode["attempts"]) if a.get("saved")), None)
         if saved and saved.get("branch"):
             lines += [f"Everything that was in the checkout is saved on branch {saved['branch']}{' on origin' if saved.get('pushed') else ' on this machine only'}."]
-        subject = f"{self.machine}: {label} needs your hands" if owner_attempt else f"{self.machine}: {label} is stuck and the fixer couldn't clear it"
+        if owner_attempt:
+            subject = f"devcluster on {self.machine}: {item.name} needs you"
+        elif _stalled(episode):
+            subject = f"devcluster on {self.machine}: the agent for {item.name} won't start"
+        else:
+            subject = f"devcluster on {self.machine}: {item.name} is stuck, and the agent couldn't fix it"
         return self._notify(subject, "\n".join(lines) + "\n", key_of(item.kind, item.name))
 
     def _notify(self, subject, body, label):
@@ -265,7 +281,7 @@ class Fixer:
         folder.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(self.now))
         message = folder / f"{stamp}-{re.sub(r'[^A-Za-z0-9._-]', '-', label)}.txt"
-        message.write_text(f"{subject}\n\n{body}")
+        message.write_text(body)
         env = dict(os.environ, DEVCLUSTER_SUBJECT=subject, DEVCLUSTER_MESSAGE=str(message), DEVCLUSTER_MACHINE=self.machine)
         sent = run_command(["/bin/sh", "-c", command], timeout=180, env=env, input=body)
         with open(folder / "sent.log", "a") as log:
@@ -325,8 +341,8 @@ class Fixer:
             episode["next_ssh"] = self.now + 600
             return self._quiet_notice(name, episode, episode["unreachable"], "unreachable")
         episode.pop("unreachable", None)
-        tries = [a for a in episode["attempts"] if a["outcome"] != "waiting"]
-        if len(tries) >= 2 or any(a["outcome"] == "needs-owner" for a in tries):
+        tries = [a for a in episode["attempts"] if a["outcome"] not in NOT_TRIES]
+        if len(tries) >= 2 or any(a["outcome"] == "needs-owner" for a in tries) or _stalled(episode):
             episode["given_up"] = "and the fixer couldn't get it reporting again"
             return self._quiet_notice(name, episode, episode["given_up"], "gave-up")
         if running or self.now < episode.get("next_try", 0):
@@ -345,7 +361,7 @@ class Fixer:
             lines = [f"{name} stopped reporting to devcluster at {_when(episode['since'])} {reason}.", ""]
             lines += _attempt_lines(episode)
             lines += [f"This was noticed by {self.machine}, the next machine in the list."]
-            if self._notify(f"{name} stopped reporting to devcluster", "\n".join(lines) + "\n", f"machine-{name}"):
+            if self._notify(f"devcluster: {name} stopped reporting", "\n".join(lines) + "\n", f"machine-{name}"):
                 told[kind] = self.now
         when = f"; the owner was told at {clock(told[kind])}" if kind in told else ""
         return ItemResult("machine", name, BLOCKED, f"stopped reporting at {since} {reason}{when}")
@@ -483,6 +499,21 @@ def _stop(running):
             if not _alive(running):
                 return
             time.sleep(0.25)
+
+
+def _stalled(episode):
+    """True when the last few starts all ended at once without a result."""
+    last = episode.get("attempts", [])[-MAX_STARTS:]
+    return len(last) == MAX_STARTS and all(a["outcome"] == "no-start" for a in last)
+
+
+def _ran_for(running):
+    """How long the agent command ran, by the clock, from its brief to its exit file."""
+    folder = Path(running["dir"])
+    try:
+        return (folder / "exit").stat().st_mtime - (folder / "brief.md").stat().st_mtime
+    except OSError:
+        return QUICK  # stopped without the shell finishing: count it as a try
 
 
 def _read_result(path):

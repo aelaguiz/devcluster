@@ -165,7 +165,7 @@ class HandOff(FixerTest):
         for minute in (6, 8, 10, 30):
             laptop.sync(now=T0 + minute * 60)
             self.assertState(laptop, "work", "blocked", "would overwrite")
-        self.assertEqual(self.messages(laptop), ["laptop: repo work is stuck and the fixer couldn't clear it"])
+        self.assertEqual(self.messages(laptop), ["devcluster on laptop: work is stuck, and the agent couldn't fix it"])
         self.assertEqual(len(self.runs(laptop)), 1, "started the same fix twice")
         body = laptop.path("notified.txt").read_text()
         self.assertIn("both copies look current", body)
@@ -181,8 +181,25 @@ class HandOff(FixerTest):
         self.wait(laptop)
         laptop.sync(now=T0 + 360)
         laptop.sync(now=T0 + 480)
-        self.assertEqual(self.messages(laptop), ["laptop: repo work needs your hands"])
+        self.assertEqual(self.messages(laptop), ["devcluster on laptop: work needs you"])
         self.assertIn("Run gh auth login on the laptop.", laptop.path("notified.txt").read_text())
+
+    def test_an_agent_that_never_gets_going_is_started_again(self):
+        laptop = self.laptop
+        self.block(laptop)
+        path = laptop.path("agent")
+        self.agent(laptop, ":")
+        path.write_text('#!/bin/sh\necho \'aim: Claude account "team" is busy\' >&2\nexit 1\n')
+        laptop.sync(now=T0 + 120)
+        for run in range(1, 4):
+            laptop.sync(now=T0 + 120 + run * 120)
+            self.assertState(laptop, "work", "busy")
+            self.wait(laptop, run)
+        laptop.sync(now=T0 + 600)
+        laptop.sync(now=T0 + 720)
+        self.assertEqual(len(self.runs(laptop)), 3)
+        self.assertEqual(self.messages(laptop), ["devcluster on laptop: the agent for work won't start"])
+        self.assertIn('Claude account "team" is busy', laptop.path("notified.txt").read_text())
 
     def test_stops_an_agent_that_runs_out_of_time(self):
         laptop = self.laptop
@@ -460,7 +477,7 @@ class Watch(FixerTest):
         for minute in (25, 27, 29):
             self.laptop.sync(now=T0 + minute * 60, PATH=self.path, DEVCLUSTER_SSH=self.ssh)
             self.assertState(self.laptop, "server", "blocked", "can't be reached over SSH")
-        self.assertEqual(self.messages(self.laptop), ["server stopped reporting to devcluster"])
+        self.assertEqual(self.messages(self.laptop), ["devcluster: server stopped reporting"])
         self.assertEqual(self.runs(self.laptop), [])
 
     def test_a_machine_that_isnt_watched_is_left_alone(self):
