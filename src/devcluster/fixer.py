@@ -109,7 +109,7 @@ class Fixer:
         if kind != "machine":
             # The item's next run is the test of the fix, so it shouldn't wait out the hour
             # a failed install normally waits before it is tried again.
-            for field in ("failed", "failed_at", "failure"):
+            for field in ("failed", "failed_at", "failed_step", "failure"):
                 self.ctx.memory.get(key, {}).pop(field, None)
         if episode is None:
             return
