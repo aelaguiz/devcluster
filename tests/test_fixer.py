@@ -437,34 +437,35 @@ class Watch(FixerTest):
         (bin_dir / "ssh").write_text('#!/bin/sh\necho "$*" >> "$HOME/ssh.log"\n[ -e "$HOME/ssh-down" ] && { echo "ssh: connect to host server.invalid port 22: Operation timed out" >&2; exit 255; }\nexit 0\n')
         (bin_dir / "ssh").chmod(0o755)
         self.path = f"{bin_dir}:{self.laptop.env()['PATH']}"
+        self.ssh = str(bin_dir / "ssh")
         self.agent(self.laptop, ":", summary="restarted the timer on server")
         self.server.sync(now=T0)
-        self.laptop.sync(now=T0, PATH=self.path)
+        self.laptop.sync(now=T0, PATH=self.path, DEVCLUSTER_SSH=self.ssh)
 
     def test_checks_a_quiet_machine_over_ssh_and_starts_the_agent(self):
-        self.laptop.sync(now=T0 + 600, PATH=self.path)
+        self.laptop.sync(now=T0 + 600, PATH=self.path, DEVCLUSTER_SSH=self.ssh)
         self.assertEqual([i for i in self.laptop.report()["items"] if i["kind"] == "machine"], [])
-        self.laptop.sync(now=T0 + 1500, PATH=self.path)
+        self.laptop.sync(now=T0 + 1500, PATH=self.path, DEVCLUSTER_SSH=self.ssh)
         item = self.assertState(self.laptop, "server", "busy", "an agent has been checking it over SSH")
         self.assertEqual(item["kind"], "machine")
         self.assertIn("BatchMode=yes", self.laptop.path("ssh.log").read_text())
         brief = (self.wait(self.laptop)[0] / "brief-read.md").read_text()
         self.assertIn("ssh agent@server.invalid", brief)
         self.server.sync(now=T0 + 1600)
-        self.laptop.sync(now=T0 + 1700, PATH=self.path)
+        self.laptop.sync(now=T0 + 1700, PATH=self.path, DEVCLUSTER_SSH=self.ssh)
         self.assertEqual([i for i in self.laptop.report()["items"] if i["kind"] == "machine"], [])
 
     def test_an_unreachable_machine_sends_one_message_and_no_agent(self):
         self.laptop.path("ssh-down").touch()
         for minute in (25, 27, 29):
-            self.laptop.sync(now=T0 + minute * 60, PATH=self.path)
+            self.laptop.sync(now=T0 + minute * 60, PATH=self.path, DEVCLUSTER_SSH=self.ssh)
             self.assertState(self.laptop, "server", "blocked", "can't be reached over SSH")
         self.assertEqual(self.messages(self.laptop), ["server stopped reporting to devcluster"])
         self.assertEqual(self.runs(self.laptop), [])
 
     def test_a_machine_that_isnt_watched_is_left_alone(self):
         self.recluster(fixer=self.fixer + "watched = false\n")
-        self.laptop.sync(now=T0 + 1500, PATH=self.path)
+        self.laptop.sync(now=T0 + 1500, PATH=self.path, DEVCLUSTER_SSH=self.ssh)
         self.assertEqual([i for i in self.laptop.report()["items"] if i["kind"] == "machine"], [])
         self.assertFalse(self.laptop.path("ssh.log").exists())
 

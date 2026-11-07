@@ -317,7 +317,7 @@ class Fixer:
             return self._quiet_notice(name, episode, "and fixer.toml names no ssh target to check it with", "no-ssh")
         if episode.get("unreachable") and self.now < episode.get("next_ssh", 0):
             return self._quiet_notice(name, episode, episode["unreachable"], "unreachable")
-        reach = run_command(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", target, "true"], timeout=45)
+        reach = run_command([_ssh(), *SSH_OPTIONS, target, "true"], timeout=45)
         if not reach.ok:
             # Look again every ten minutes, so a machine that wakes up without reporting
             # still gets an agent.
@@ -349,6 +349,15 @@ class Fixer:
                 told[kind] = self.now
         when = f"; the owner was told at {clock(told[kind])}" if kind in told else ""
         return ItemResult("machine", name, BLOCKED, f"stopped reporting at {since} {reason}{when}")
+
+
+# No prompts, a short wait, and a neighbour's host key accepted the first time (a changed one is
+# still refused). The system's ssh, because a wrapper on PATH may expect a terminal.
+SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=accept-new")
+
+
+def _ssh():
+    return os.environ.get("DEVCLUSTER_SSH") or ("/usr/bin/ssh" if Path("/usr/bin/ssh").exists() else "ssh")
 
 
 # Saving a checkout
