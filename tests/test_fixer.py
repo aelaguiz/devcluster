@@ -189,7 +189,7 @@ class HandOff(FixerTest):
         self.block(laptop)
         path = laptop.path("agent")
         self.agent(laptop, ":")
-        path.write_text('#!/bin/sh\necho \'aim: Claude account "team" is busy\' >&2\nexit 1\n')
+        path.write_text('#!/bin/sh\necho \'agent: account "team" is busy\' >&2\nexit 1\n')
         laptop.sync(now=T0 + 120)
         for run in range(1, 4):
             laptop.sync(now=T0 + 120 + run * 120)
@@ -199,7 +199,7 @@ class HandOff(FixerTest):
         laptop.sync(now=T0 + 720)
         self.assertEqual(len(self.runs(laptop)), 3)
         self.assertEqual(self.messages(laptop), ["devcluster on laptop: the agent for work won't start"])
-        self.assertIn('Claude account "team" is busy', laptop.path("notified.txt").read_text())
+        self.assertIn('account "team" is busy', laptop.path("notified.txt").read_text())
 
     def test_stops_an_agent_that_runs_out_of_time(self):
         laptop = self.laptop
