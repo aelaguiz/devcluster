@@ -10,7 +10,7 @@ from ..git import Git, clone
 from ..paths import clock, expand
 from ..proc import shell, tail
 from ..results import BLOCKED, CHANGED, FAILED, OK, WOULD_CHANGE, plural
-from .checkouts import CLONE_TIMEOUT, FAST_FORWARD, FETCH_TIMEOUT, MERGE_TIMEOUT, _preflight, _update_failed
+from .checkouts import CLONE_TIMEOUT, FAST_FORWARD, FETCH_TIMEOUT, _cleared, _preflight, _update_failed, update
 
 CHECK_TIMEOUT = 60
 CLI_INSTALL_TIMEOUT = 1200
@@ -109,10 +109,10 @@ def sync_secrets(item, ctx):
     behind = git.count(f"{head}..{remote}")
     if ctx.dry_run:
         return result(item, WOULD_CHANGE, f"would pull {plural(behind, 'commit')} and decrypt")
-    moved = git.run(*FAST_FORWARD, remote, timeout=MERGE_TIMEOUT)
+    moved, cleared = update(git, FAST_FORWARD, remote)
     if not moved.ok:
-        return _update_failed(item, moved, f"pulling {plural(behind, 'commit')}", [])
-    return _decrypt(item, ctx, git, timeout, f"pulled {plural(behind, 'commit')}")
+        return _update_failed(item, moved, f"pulling {plural(behind, 'commit')}", [], git, remote)
+    return _decrypt(item, ctx, git, timeout, f"pulled {plural(behind, 'commit')}" + _cleared(cleared))
 
 
 def _plaintext(git):

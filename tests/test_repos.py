@@ -75,6 +75,114 @@ class RepoSync(ClusterTest):
         self.assertState(self.laptop, "work", "blocked", "would overwrite untracked files in new.txt")
         self.assertEqual(self.laptop.path("workspace/work/new.txt").read_text(), "mine, not committed\n")
 
+    def test_identical_untracked_copy_is_cleared(self):
+        new = self.world.commit("work", {"new.txt": "from origin\n"})
+        self.laptop.path("workspace/work/new.txt").write_text("from origin\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "changed", "pulled 1 commit, after clearing 1 file here that was identical to the incoming one")
+        self.assertEqual(self.laptop.git("workspace/work", "rev-parse", "HEAD"), new)
+        self.assertEqual(self.laptop.git("workspace/work", "status", "--porcelain"), "")
+        self.assertEqual(list(self.laptop.path("workspace/work/.git/devcluster").glob("cleared-*")), [])
+
+    def test_identical_uncommitted_change_is_cleared(self):
+        new = self.world.commit("work", {"notes.txt": "two\n"})
+        self.laptop.path("workspace/work/notes.txt").write_text("two\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "changed", "pulled 1 commit, after clearing 1 file")
+        self.assertEqual(self.laptop.git("workspace/work", "rev-parse", "HEAD"), new)
+        self.assertEqual(self.laptop.git("workspace/work", "status", "--porcelain"), "")
+
+    def test_one_differing_file_blocks_and_only_it_is_named(self):
+        before = self.laptop.git("workspace/work", "rev-parse", "HEAD")
+        self.world.commit("work", {"same.txt": "same\n", "new.txt": "from origin\n"})
+        self.laptop.path("workspace/work/same.txt").write_text("same\n")
+        self.laptop.path("workspace/work/new.txt").write_text("mine\n")
+        self.laptop.sync()
+        item = self.assertState(self.laptop, "work", "blocked", "would overwrite untracked files in new.txt (1 more file in the way is identical to the incoming one)")
+        self.assertEqual(item["detail"], "new.txt")
+        self.assertEqual(self.laptop.git("workspace/work", "rev-parse", "HEAD"), before)
+        self.assertEqual(self.laptop.path("workspace/work/same.txt").read_text(), "same\n")
+        self.assertEqual(self.laptop.path("workspace/work/new.txt").read_text(), "mine\n")
+
+    def test_a_mix_of_kinds_is_named_by_kind(self):
+        self.world.commit("work", {"notes.txt": "two\n", "new.txt": "from origin\n"})
+        self.laptop.path("workspace/work/notes.txt").write_text("my unsaved edit\n")
+        self.laptop.path("workspace/work/new.txt").write_text("mine\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "blocked", "would overwrite uncommitted changes and untracked files in ")
+        self.assertEqual(self.laptop.path("workspace/work/notes.txt").read_text(), "my unsaved edit\n")
+        self.assertEqual(self.laptop.path("workspace/work/new.txt").read_text(), "mine\n")
+
+    def test_a_staged_third_version_blocks(self):
+        self.world.commit("work", {"notes.txt": "two\n"})
+        self.laptop.path("workspace/work/notes.txt").write_text("staged\n")
+        self.laptop.git("workspace/work", "add", "notes.txt")
+        self.laptop.path("workspace/work/notes.txt").write_text("two\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "blocked", "would overwrite uncommitted changes in notes.txt")
+        self.assertEqual(self.laptop.git("workspace/work", "show", ":notes.txt"), "staged")
+        self.assertEqual(self.laptop.path("workspace/work/notes.txt").read_text(), "two\n")
+
+    def test_a_staged_executable_bit_blocks(self):
+        self.world.commit("work", {"notes.txt": "two\n"})
+        self.laptop.git("workspace/work", "update-index", "--chmod=+x", "notes.txt")
+        self.laptop.path("workspace/work/notes.txt").write_text("two\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "blocked", "would overwrite uncommitted changes in notes.txt")
+        self.assertTrue(self.laptop.git("workspace/work", "ls-files", "--stage", "notes.txt").startswith("100755 "))
+
+    def test_different_line_endings_block(self):
+        self.laptop.git("workspace/work", "config", "core.autocrlf", "input")
+        self.world.commit("work", {"new.txt": "hello\n"})
+        self.laptop.path("workspace/work/new.txt").write_bytes(b"hello\r\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "blocked", "would overwrite untracked files in new.txt")
+        self.assertEqual(self.laptop.path("workspace/work/new.txt").read_bytes(), b"hello\r\n")
+
+    def test_a_name_with_brackets_is_not_a_pattern(self):
+        self.world.commit("work", {"pages/[id].txt": "a\n", "pages/i.txt": "one\n"})
+        self.laptop.sync()
+        new = self.world.commit("work", {"pages/[id].txt": "b\n"})
+        self.laptop.path("workspace/work/pages/[id].txt").write_text("b\n")
+        self.laptop.path("workspace/work/pages/i.txt").write_text("staged\n")
+        self.laptop.git("workspace/work", "add", "pages/i.txt")
+        self.laptop.path("workspace/work/pages/i.txt").write_text("not staged\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "changed", "after clearing 1 file")
+        self.assertEqual(self.laptop.git("workspace/work", "rev-parse", "HEAD"), new)
+        self.assertEqual(self.laptop.git("workspace/work", "show", ":pages/i.txt"), "staged")
+        self.assertEqual(self.laptop.path("workspace/work/pages/i.txt").read_text(), "not staged\n")
+
+    def test_a_different_executable_bit_blocks(self):
+        self.world.commit("work", {"new.txt": "x\n"})
+        self.laptop.path("workspace/work/new.txt").write_text("x\n")
+        self.laptop.path("workspace/work/new.txt").chmod(0o755)
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "blocked", "would overwrite untracked files in new.txt")
+        self.assertTrue(self.laptop.path("workspace/work/new.txt").stat().st_mode & 0o100)
+
+    def test_a_file_changed_while_it_is_cleared_is_put_back(self):
+        repo = self.laptop.path("workspace/work")
+        edit = f'for f in "{repo}"/.git/devcluster/cleared-*/new.txt; do echo changed > "$f"; done'
+        path = wrap_git(self.laptop, '*" hash-object --no-filters -- "*/cleared-*', before=edit)
+        before = self.laptop.git("workspace/work", "rev-parse", "HEAD")
+        self.world.commit("work", {"new.txt": "from origin\n"})
+        self.laptop.path("workspace/work/new.txt").write_text("from origin\n")
+        self.laptop.sync(PATH=path)
+        self.assertState(self.laptop, "work", "blocked", "would overwrite untracked files in new.txt")
+        self.assertEqual(self.laptop.path("workspace/work/new.txt").read_text(), "changed\n")
+        self.assertEqual(self.laptop.git("workspace/work", "rev-parse", "HEAD"), before)
+        self.assertEqual(list(self.laptop.path("workspace/work/.git/devcluster").glob("cleared-*")), [])
+
+    def test_identical_copy_is_cleared_through_a_merge(self):
+        self.laptop.commit("workspace/work", {"mine.txt": "x\n"})
+        self.world.commit("work", {"new.txt": "from origin\n"})
+        self.laptop.path("workspace/work/new.txt").write_text("from origin\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "changed", "merged 1 commit from origin, after clearing 1 file")
+        self.assertEqual(self.laptop.git("workspace/work", "status", "--porcelain"), "")
+        self.assertEqual(self.world.head("work"), self.laptop.git("workspace/work", "rev-parse", "HEAD"))
+
     def test_uncommitted_change_elsewhere_is_kept_through_a_merge(self):
         self.world.commit("work", {"README.md": "origin\n"})
         self.laptop.commit("workspace/work", {"mine.txt": "x\n"})

@@ -4,7 +4,8 @@ A repo syncs both ways: origin's commits come in, this machine's commits go out.
 A tool only follows: it moves to the ref the list names and never pushes.
 
 Nothing here force-pushes, rebases, or discards a change. Git's own refusal to
-overwrite uncommitted work is passed on as "Needs you", with the file names.
+overwrite uncommitted work is passed on as "Needs you", with the file names, unless every
+file in the way already holds exactly what the update would write there.
 
 When the commit changes, the item's install runs, then its check (see installs.py). If
 either fails, the files the install changed go back as they were, and a tool also goes
@@ -12,13 +13,16 @@ back to the last commit that installed cleanly. A repo's checkout never goes bac
 people work in it.
 """
 
+import os
 import re
+import shutil
+import time
 
 from .. import installs
 from ..context import result
 from ..git import Git, clone, git_version, same_remote, short, version_text
 from ..paths import clock, expand
-from ..proc import tail
+from ..proc import run, tail
 from ..results import BLOCKED, BUSY, CHANGED, FAILED, OK, WOULD_CHANGE, plural
 
 FETCH_TIMEOUT = 600
@@ -72,15 +76,15 @@ def sync_repo(item, ctx):
             switched = _switched(item, git, branch, done)
             if switched:
                 return switched
-            moved = git.run(*FAST_FORWARD, remote, timeout=MERGE_TIMEOUT)
+            moved, cleared = update(git, FAST_FORWARD, remote)
             if not moved.ok:
                 if _raced(moved):
                     continue
-                return _update_failed(item, moved, f"pulling {plural(behind, 'commit')} from origin", done)
+                return _update_failed(item, moved, f"pulling {plural(behind, 'commit')} from origin", done, git, remote)
             switched = _switched(item, git, branch, done, after=True)
             if switched:
                 return switched
-            done.append(f"pulled {plural(behind, 'commit')}")
+            done.append(f"pulled {plural(behind, 'commit')}" + _cleared(cleared))
             break
 
         if behind == 0:
@@ -119,15 +123,16 @@ def sync_repo(item, ctx):
         switched = _switched(item, git, branch, done)
         if switched:
             return switched
-        moved = git.run(*FAST_FORWARD, made.out.strip(), timeout=MERGE_TIMEOUT)
+        merge = made.out.strip()
+        moved, cleared = update(git, FAST_FORWARD, merge)
         if not moved.ok:
             if _raced(moved):
                 continue
-            return _update_failed(item, moved, "merging origin's commits", done)
+            return _update_failed(item, moved, "merging origin's commits", done, git, merge)
         switched = _switched(item, git, branch, done, after=True)
         if switched:
             return switched
-        done.append(f"merged {plural(behind, 'commit')} from origin")
+        done.append(f"merged {plural(behind, 'commit')} from origin" + _cleared(cleared))
         # The next round pushes the merge.
     else:
         return result(item, FAILED, _prefix(done, "origin kept moving while devcluster pushed; the next run tries again"))
@@ -191,13 +196,13 @@ def sync_tool(item, ctx):
         switched = _switched(item, git, ref, done)
         if switched:
             return switched
-        moved = git.run(*FAST_FORWARD, target, timeout=MERGE_TIMEOUT)
+        moved, cleared = update(git, FAST_FORWARD, target)
     else:
         # Going back, or to a pinned version, detaches at that commit instead of moving a
         # branch, so no commit can be dropped, not even one an agent makes during the run.
-        moved = git.run("checkout", "--quiet", "--no-overwrite-ignore", "--detach", target, timeout=MERGE_TIMEOUT)
+        moved, cleared = update(git, ("checkout", "--quiet", "--no-overwrite-ignore", "--detach"), target)
     if not moved.ok:
-        return _update_failed(item, moved, f"moving it to {short(target)}", done)
+        return _update_failed(item, moved, f"moving it to {short(target)}", done, git, target)
     if forward:
         switched = _switched(item, git, ref, done, after=True)
         if switched:
@@ -206,7 +211,7 @@ def sync_tool(item, ctx):
         kept = _keep_stray_commit(git, head)
         if kept:
             return result(item, BLOCKED, f"a commit was made here while devcluster moved it to {short(target)}; that commit is kept on branch {kept}")
-    done.append(f"{verb}d from {short(head)}" if forward else f"moved from {short(head)}")
+    done.append((f"{verb}d from {short(head)}" if forward else f"moved from {short(head)}") + _cleared(cleared))
     memory["at"] = target
     return _after_update(item, ctx, git, done, tool=True)
 
@@ -355,17 +360,168 @@ def _rejected(pushed):
     ))
 
 
-def _update_failed(item, moved, what, done):
+def _update_failed(item, moved, what, done, git=None, target=None):
     text = moved.err + moved.out
-    if "would be overwritten" in text:
-        files = [line.strip() for line in text.splitlines() if line.startswith("\t")]
-        kind = "untracked files" if "untracked working tree files" in text else "uncommitted changes"
-        return result(item, BLOCKED, _prefix(done, f"{what} would overwrite {kind} in {_files(files)}; nothing was changed"), "\n".join(files))
+    files = _in_the_way(moved)
+    if files:
+        differ = [name for name in files if not (git and _matching(git, target, name))] or list(files)
+        kinds = {kind for name, kind in files.items() if name in differ}
+        kind = " and ".join(k for k in ("uncommitted changes", "untracked files") if k in kinds)
+        same = len(files) - len(differ)
+        note = f" ({plural(same, 'more file')} in the way {'is' if same == 1 else 'are'} identical to the incoming {'one' if same == 1 else 'ones'})" if same else ""
+        return result(item, BLOCKED, _prefix(done, f"{what} would overwrite {kind} in {_files(differ)}{note}; nothing was changed"), "\n".join(differ))
     if "index.lock" in text:
         return result(item, BUSY, _prefix(done, "another Git command was using it; the next run tries again"))
     if moved.timed_out:
         return result(item, FAILED, _prefix(done, f"{what} timed out"))
     return result(item, FAILED, _prefix(done, f"{what} failed: {moved.first_line()}"), tail(text))
+
+
+def update(git, command, target):
+    """Run a fast-forward or checkout to target. When Git refuses because files here are in
+    the way, and every one of them already holds exactly what target has, clear them and run
+    it again: the update writes the same contents back, so nothing is lost. Returns the last
+    run, and how many files were cleared."""
+    moved = git.run(*command, target, timeout=MERGE_TIMEOUT)
+    files = _in_the_way(moved)
+    if moved.ok or not files:
+        return moved, 0
+    blobs = {}
+    for name in files:
+        blobs[name] = _matching(git, target, name)
+        if not blobs[name]:
+            return moved, 0
+    folder = git.git_path(f"devcluster/cleared-{time.time_ns()}")
+    cleared = _clear(git, blobs, folder)
+    if cleared is None:
+        return moved, 0
+    again = git.run(*command, target, timeout=MERGE_TIMEOUT)
+    if again.ok:
+        shutil.rmtree(folder, ignore_errors=True)
+        return again, len(files)
+    _undo(git, *cleared, folder)
+    return again, 0
+
+
+def _in_the_way(moved):
+    """The files Git named when it refused to overwrite them, each with what Git said it is:
+    an uncommitted change or an untracked file."""
+    text = moved.err + moved.out
+    files, kind = {}, None
+    if moved.ok or "would be overwritten" not in text:
+        return files
+    for line in text.splitlines():
+        if line.startswith("\t"):
+            if kind:
+                files[line[1:]] = kind
+        elif "would be overwritten" in line:
+            kind = "untracked files" if "untracked working tree files" in line else "uncommitted changes"
+        else:
+            kind = None
+    return files
+
+
+def _matching(git, target, name):
+    """When the file here holds exactly the bytes the update would write at this path, with the
+    same executable bit, and no third version of it is staged: the target's blob, and the hash
+    of those bytes. Otherwise None."""
+    path = git.path / name
+    if path.is_symlink() or not path.is_file():
+        return None
+    entry = _entry(git, target, name)
+    if not entry or entry[0] not in ("100644", "100755"):
+        return None
+    mode, blob = entry
+    if (mode == "100755") != bool(path.stat().st_mode & 0o100):
+        return None
+    # Compare raw bytes with what checkout would write, so a line-ending or filter
+    # conversion Git treats as the same file still counts as a difference.
+    written = run(["/bin/sh", "-c", 'git -C "$1" cat-file --filters "$2" | git hash-object --no-filters --stdin', "sh", str(git.path), f"{target}:{name}"], timeout=300, env=git.env)
+    raw = written.out.strip() if written.ok else None
+    if not raw or git.out("hash-object", "--no-filters", "--", name, timeout=300) != raw:
+        return None
+    staged = _staged(git, name)
+    if staged and staged not in (entry, _entry(git, "HEAD", name)):
+        return None
+    return blob, raw
+
+
+def _entry(git, tree, name):
+    """The mode and blob tree has at exactly this path, or None."""
+    listed = git.out("--literal-pathspecs", "ls-tree", "-z", "--full-tree", tree, "--", name, timeout=60)
+    for line in (listed or "").split("\0"):
+        info, _, path = line.partition("\t")
+        parts = info.split()
+        if path == name and len(parts) == 3 and parts[1] == "blob":
+            return parts[0], parts[2]
+    return None
+
+
+def _staged(git, name):
+    """The mode and blob staged at exactly this path, or None when nothing is. A conflicted
+    path counts as a third version."""
+    listed = git.out("--literal-pathspecs", "ls-files", "-z", "--stage", "--", name, timeout=60)
+    found = []
+    for line in (listed or "").split("\0"):
+        info, _, path = line.partition("\t")
+        parts = info.split()
+        if path == name and len(parts) == 3:
+            found.append((parts[0], parts[1]) if parts[2] == "0" else ("conflicted", parts[1]))
+    return found[0] if len(found) == 1 else (("conflicted", "") if found else None)
+
+
+def _clear(git, blobs, folder):
+    """Clear matching files out of the way. A tracked file is staged as it is, which leaves it
+    on disk. An untracked one is moved into the Git folder and checked again there, in case it
+    changed in the meantime. Returns what was staged and what was moved, or None after undoing
+    both."""
+    staged, moved = [], []
+    for name, (blob, raw) in blobs.items():
+        here = _staged(git, name)
+        if here:
+            if here[1] != blob:
+                if not git.run("--literal-pathspecs", "add", "--sparse", "--", name, timeout=60).ok:
+                    _undo(git, staged, moved, folder)
+                    return None
+                staged.append(name)
+            continue
+        there = folder / name
+        try:
+            there.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(git.path / name, there)
+        except OSError:
+            _undo(git, staged, moved, folder)
+            return None
+        moved.append((git.path / name, there))
+        if git.out("hash-object", "--no-filters", "--", str(there), timeout=300) != raw:
+            _undo(git, staged, moved, folder)
+            return None
+    return staged, moved
+
+
+def _undo(git, staged, moved, folder):
+    """Put cleared files back as they were. A moved file goes back only where nothing has taken
+    its place; if any can't, the folder holding it stays."""
+    if staged:
+        git.run("--literal-pathspecs", "reset", "--quiet", "--", *staged, timeout=60)
+    kept = False
+    for original, there in moved:
+        try:
+            if original.exists() or original.is_symlink():
+                kept = True
+                continue
+            original.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(there, original)
+        except OSError:
+            kept = True
+    if not kept:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _cleared(count):
+    if not count:
+        return ""
+    return f", after clearing {plural(count, 'file')} here that {'was' if count == 1 else 'were'} identical to the incoming {'one' if count == 1 else 'ones'}"
 
 
 def _conflicted(output):
