@@ -21,7 +21,7 @@ A check proves that the install works on this machine: the skill copies match th
 
 `[[repo]]` and `[[tool]]` items get an `installs_into` field: the folders the install writes into, such as `~/.claude/skills`. A `*` in a path matches any one folder name.
 
-Several tools install into the same folders, and devcluster mustn't need to know how each tool lays out its files. So it watches instead. Just before an install, it lists every file under those folders with its size, modification time, change time and inode. Just after, it lists them again. A file that's new or changed was written by this install. devcluster records each such file with a hash of its contents, as the item's own files. A file the install removed is dropped from the record.
+Several tools install into the same folders, and devcluster mustn't need to know how each tool lays out its files. So it watches instead. Just before an install, it lists every file under those folders with its size, modification time, change time and inode. Just after, it lists them again. A file that's new or changed was written by this install. devcluster records each such file with a hash of its contents, as the item's own files. A file the install removed is dropped from the record, and one it left alone keeps its old hash, so an edit to it is still noticed before a later install overwrites it.
 
 ### Installed copies edited by hand
 
@@ -37,8 +37,8 @@ The issue asked for edited copies to be reported, not overwritten. Keeping a cop
 
 Before an install, devcluster copies the item's own files to `state/backup/<item>/`. If the install or its check fails:
 
-1. **The files go back.** Every file the failed install changed or removed is restored from the backup, and every file it added is removed. Only the item's own files are restored. A file the item has never installed before isn't touched.
-2. **A tool goes back to its last good commit.** devcluster remembers the last commit whose install and check passed. It moves the checkout back to that commit, detached, as it already does when a list pins an older version, and runs that commit's install and check again. This also restarts any service with the old code.
+1. **The files go back.** Every file of the item's own that the failed install changed or removed is restored from the backup. Every file it added is moved to `state/removed/<item>/` and kept there a week, not deleted: in a shared folder, another agent may have made one while the install ran. A file the item has never installed before isn't put back. Nothing is written or moved through a symlinked folder, since skill folders link into other repos.
+2. **A tool goes back to its last good commit.** devcluster remembers the last commit whose install and check passed. It moves the checkout back to that commit, detached, as it already does when a list pins an older version, and runs that commit's install and check again. This also restarts any service with the old code. If someone committed in the checkout while the install ran, it's left where it is. If going back or reinstalling fails, say because another Git command held the checkout, the next run tries again.
 3. **A repo stays where it is.** People work in a repo's checkout, so devcluster never moves it back. Its files go back, and that's all.
 4. **The report says what happened:** which commit failed, the last lines of its output, and which commit is in use now.
 5. **The failed commit isn't tried again** until `retry_failed_after` has passed (an hour by default), or until a newer commit arrives. While it waits, a tool stays on its last good commit, and its report says so.
@@ -76,7 +76,7 @@ On the fake cluster, as for #1:
 | Check | A passing check. A failing check rolls back like a failed install. A check isn't run in dry run. |
 | What the install wrote | Files written, rewritten with the same contents (as `rm -rf` then `cp` does), and removed. Two tools installing into the same folder each record only their own files. A `*` in `installs_into`. |
 | Edits | An edited file is kept and the install goes ahead. A kept copy identical to the new install is dropped. "Needs you" lasts until the kept folder is removed. An edit to a file the item doesn't own is ignored. |
-| Rollback | A tool's failed install puts its files back, returns it to the last good commit and reinstalls it, and doesn't retry the bad commit until the wait is over or a newer commit arrives. A repo's failed install puts the files back and leaves the checkout. A failure on the first install leaves it where it is. A failed check rolls back. |
+| Rollback | A tool's failed install puts its files back, returns it to the last good commit and reinstalls it, and doesn't retry the bad commit until the wait is over or a newer commit arrives. A repo's failed install puts the files back and leaves the checkout. A failure on the first install leaves it where it is. A failed check rolls back. Added files are moved aside, not deleted. A symlinked folder is never written or moved through. A commit made during the install stays put. Going back, and reinstalling the good commit, are retried on the next run when they fail. |
 | Trial | An item in dry run on a machine that's on reports and changes nothing, while the other items sync. |
 
 ## Trying it on real machines

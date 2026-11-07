@@ -21,6 +21,7 @@ from pathlib import Path
 from .proc import shell, tail
 
 INSTALL_TIMEOUT = 1800
+REMOVED_KEPT_FOR = 7 * 86400  # how long files a failed install added stay in state/removed
 OUTSIDE_HOME = "_root"  # where kept/ and backup/ store a file from outside the home folder
 
 
@@ -32,6 +33,7 @@ class Outcome:
     output: str = ""
     kept: list = field(default_factory=list)  # edited files kept aside this time
     restored: bool = False
+    moved_aside: int = 0  # files a failed install added, moved out of the way
 
 
 # Where things live
@@ -130,6 +132,23 @@ def _copy(source, target):
     shutil.copy2(source, target, follow_symlinks=False)
 
 
+def _through_link(path, folders):
+    """True when a folder between the watched folder and the path is a symlink, or the path
+    isn't under a watched folder at all. Writing or removing there would land somewhere else,
+    such as inside a repo a skill folder links to, so devcluster leaves it alone."""
+    for root in folders:
+        prefix = root.rstrip(os.sep) + os.sep
+        if path.startswith(prefix):
+            current = root
+            for part in os.path.dirname(path)[len(prefix):].split(os.sep):
+                if part:
+                    current = os.path.join(current, part)
+                    if os.path.islink(current):
+                        return True
+            return False
+    return True
+
+
 # Edits made by hand
 
 
@@ -187,6 +206,18 @@ def _drop_identical(folder, paths):
     return remaining
 
 
+def _forget_old(folder, now):
+    """Remove sets of moved-aside files older than REMOVED_KEPT_FOR."""
+    if not folder.is_dir():
+        return
+    for stamp in folder.iterdir():
+        try:
+            if now - stamp.stat().st_mtime > REMOVED_KEPT_FOR:
+                shutil.rmtree(stamp)
+        except OSError:
+            pass
+
+
 def _prune(folder):
     """Remove empty folders under and including this one."""
     if not folder.is_dir():
@@ -228,26 +259,42 @@ def run(item, ctx, cwd):
     removed = set(before) - set(after)
 
     if outcome.ok:
-        files = {path: digest(path) for path in (set(owned) - removed) | written if _is_file(path)}
+        # A file this install wrote is recorded as it is now. One it left alone keeps its
+        # old record, so an edit made to it is still noticed before a later install.
+        files = {path: owned[path] for path in set(owned) - removed - written}
+        files.update({path: digest(path) for path in written if _is_file(path)})
         _save_own_files(ctx, item, files)
         # A kept copy identical to what's installed now means someone ran the same install by hand.
         outcome.kept = _drop_identical(kept_folder, changed)
         shutil.rmtree(backup, ignore_errors=True)
         return outcome
 
-    # Put back what the failed install changed: the item's own files from the backup, and
-    # remove the files it added. A file the item never installed isn't the item's to restore.
-    for path in sorted(written | removed):
-        saved = backup / _inside(path)
-        if path in owned and (saved.is_symlink() or saved.exists()):
-            _copy(saved, path)
-        elif path not in before and os.path.lexists(path) and not os.path.isdir(path):
-            os.unlink(path)
+    # Put back what the failed install changed: move the files it added out of the way, then
+    # put the item's own files back from the backup. Moving first matters: putting back a
+    # symlinked folder before moving the files the install wrote at that path would move them
+    # through the link. Added files are moved, not deleted, because another agent may have
+    # made one in a shared folder while the install ran. A file the item never installed
+    # isn't the item's to restore.
+    folders = roots(item)
+    aside = _folder(ctx, "state/removed", item)
+    _forget_old(aside, ctx.now)
+    stamp = aside / time.strftime("%Y-%m-%d-%H%M%S", time.localtime(ctx.now))
+    for path in sorted(written - set(before), key=len, reverse=True):
+        if os.path.lexists(path) and not (os.path.isdir(path) and not os.path.islink(path)) and not _through_link(path, folders):
+            target = stamp / _inside(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(path, target)
+            outcome.moved_aside += 1
     for folder in sorted(after_folders - before_folders, key=len, reverse=True):
-        try:
-            os.rmdir(folder)
-        except OSError:
-            pass
+        if not _through_link(folder, folders):
+            try:
+                os.rmdir(folder)
+            except OSError:
+                pass
+    for path in sorted((written | removed) & set(owned), key=len):
+        saved = backup / _inside(path)
+        if (saved.is_symlink() or saved.exists()) and not _through_link(path, folders):
+            _copy(saved, path)
     shutil.rmtree(backup, ignore_errors=True)
     outcome.restored = True
     # The edits are back in place with the rest, so their kept copies aren't needed.

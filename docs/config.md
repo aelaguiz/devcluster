@@ -88,10 +88,10 @@ A repo's or tool's `install` runs when its commit changes. Then its `check` runs
 
 With `installs_into`:
 
-- **An installed file edited on this machine is kept.** Before an install, an own file whose contents changed since the last install is copied to `~/.devcluster/kept/NAME/<date and time>/`, under its path in the home folder, and the install goes ahead. A copy identical to what the install then writes is dropped. The item shows as "Needs you" until that folder is deleted.
-- **A failed install or check puts the files back.** The item's own files go back as they were before the install, and files it added are removed. A file the item has never installed before isn't touched.
+- **An installed file edited on this machine is kept.** Before an install, an own file whose contents changed since an install last wrote it is copied to `~/.devcluster/kept/NAME/<date and time>/`, under its path in the home folder, and the install goes ahead. A copy identical to what the install then writes is dropped. The item shows as "Needs you" until that folder is deleted.
+- **A failed install or check puts the files back.** The item's own files go back as they were before the install. Files it added are moved to `~/.devcluster/state/removed/NAME/`, where they stay for a week: in a folder several tools and agents share, one of them could be someone else's. A file the item has never installed before isn't put back, and nothing is written or moved through a symlinked folder.
 
-Whether or not it has `installs_into`, when a tool's install or check fails, the tool goes back to the last commit whose install and check passed, detached, and that commit's install runs again. A repo's checkout stays where it is, because people work in it. A failed commit is tried again after `retry_failed_after`, or as soon as a newer commit arrives. Until then, a tool stays on its last good commit.
+Whether or not it has `installs_into`, when a tool's install or check fails, the tool goes back to the last commit whose install and check passed, detached, and that commit's install runs again. If the checkout moved while the install ran, because someone committed there, it's left where it is. If going back or installing the good commit again fails, the next run tries again. A repo's checkout stays where it is, because people work in it. A failed commit is tried again after `retry_failed_after`, or as soon as a newer commit arrives. Until then, a tool stays on its last good commit.
 
 ### [[cli]]
 

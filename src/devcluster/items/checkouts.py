@@ -175,12 +175,12 @@ def sync_tool(item, ctx):
     memory = ctx.mem(item)
     if branch_target and current not in (None, ref):
         return result(item, BLOCKED, f"is checked out on {current}, not {ref}")
+    good = memory.get("good")
+    if memory.get("failed") == target and _waiting(ctx, memory) and good not in (None, target) and head in (target, good):
+        return _while_failed(item, ctx, git, head, target, good)
     if head == target:
         memory["at"] = head
         return _after_update(item, ctx, git, done, tool=True)
-    if memory.get("failed") == target and head == memory.get("good") and _waiting(ctx, memory):
-        retry = clock(memory["failed_at"] + ctx.retry_after)
-        return _report(item, ctx, FAILED, f"stays on {short(head)}, its last good commit: {short(target)} failed its {memory.get('failed_step', 'install')} at {clock(memory['failed_at'])}, and is tried again after {retry}", memory.get("failure", ""))
 
     # Commits origin doesn't have were made here, unless the checkout is still exactly
     # where devcluster last put it: then they came from origin before it was rewound.
@@ -280,29 +280,58 @@ def _after_update(item, ctx, git, done, tool=False):
     if outcome.restored:
         text += "; the files it changed were put back"
     good = memory.get("good")
+    if outcome.moved_aside:
+        added = "the file it added was" if outcome.moved_aside == 1 else f"the {outcome.moved_aside} files it added were"
+        text += f"; {added} moved to ~/.devcluster/state/removed/{item.name}"
     if tool and good and good != head:
-        text += "; " + _go_back(item, ctx, git, good)
+        text += "; " + _go_back(item, ctx, git, good, head)
     return _report(item, ctx, FAILED, text, outcome.output)
 
 
-def _go_back(item, ctx, git, good):
-    """Return a tool to its last good commit and install that again. Says what happened."""
+def _go_back(item, ctx, git, good, failed):
+    """Return a tool from the commit whose install failed to its last good commit, and
+    install that again. Says what happened."""
     memory = ctx.mem(item)
     head = git.rev("HEAD")
+    if head != failed:
+        # Someone committed or moved the checkout while the install ran: leave their work be.
+        return f"its checkout moved to {short(head)} while the install ran, so devcluster left it there"
     moved = git.run("checkout", "--quiet", "--no-overwrite-ignore", "--detach", good, timeout=MERGE_TIMEOUT)
     if not moved.ok:
-        return f"couldn't go back to {short(good)}, its last good commit: {moved.first_line()}"
+        return f"couldn't go back to {short(good)}, its last good commit ({moved.first_line()}); the next run tries again"
     kept = _keep_stray_commit(git, head)
     memory["at"] = good
+    memory.pop("installed", None)
     said = f"went back to {short(good)}, its last good commit"
     if kept:
         said += f" (a commit made here meanwhile is kept on branch {kept})"
+    return said + _install_good(item, ctx, git, good)
+
+
+def _install_good(item, ctx, git, good):
     again = installs.run(item, ctx, git.path)
     if again.ok:
-        memory["installed"] = good
-        return said + ", and installed it again"
-    memory.pop("installed", None)
-    return said + f", but its {again.step} {again.how} there too"
+        ctx.mem(item)["installed"] = good
+        return ", and installed it again"
+    return f", but its {again.step} {again.how} there too; the next run tries again"
+
+
+def _while_failed(item, ctx, git, head, target, good):
+    """A tool whose newest commit failed, until that commit may be tried again: get back to
+    the last good commit and its install, or stay there."""
+    memory = ctx.mem(item)
+    step = memory.get("failed_step", "install")
+    waiting = f"{short(target)} failed its {step} at {clock(memory['failed_at'])}, and is tried again after {clock(memory['failed_at'] + ctx.retry_after)}"
+    failure = memory.get("failure", "")
+    if head == target:  # going back failed on an earlier run
+        if ctx.dry_run:
+            return _report(item, ctx, WOULD_CHANGE, f"{waiting}; would go back to {short(good)}, its last good commit")
+        return _report(item, ctx, FAILED, f"{waiting}; {_go_back(item, ctx, git, good, target)}", failure)
+    if memory.get("installed") != good:  # installing the good commit again failed on an earlier run
+        if ctx.dry_run:
+            return _report(item, ctx, WOULD_CHANGE, f"{waiting}; would install {short(good)}, its last good commit, again")
+        return _report(item, ctx, FAILED, f"{waiting}; stays on {short(good)}, its last good commit" + _install_good(item, ctx, git, good), failure)
+    return _report(item, ctx, FAILED, f"stays on {short(good)}, its last good commit: {waiting}", failure)
 
 
 def _waiting(ctx, memory):

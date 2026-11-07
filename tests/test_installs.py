@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from devcluster import config as configs
-from tests.fakes import ClusterTest
+from tests.fakes import ClusterTest, wrap_git
 from tests.test_engine import write_config
 
 # The skill folder is removed and copied again, as most skill installs do, so every file is
@@ -17,6 +17,7 @@ from tests.test_engine import write_config
 INSTALL = textwrap.dedent('''\
     #!/bin/sh
     set -e
+    [ ! -e "$HOME/.fail-install" ] || { echo "told to fail" >&2; exit 9; }
     rm -rf "$HOME/.skills/demo"
     mkdir -p "$HOME/.skills/demo"
     cp -R skill/. "$HOME/.skills/demo/"
@@ -112,9 +113,13 @@ class Installs(ClusterTest):
             ''')})
         self.laptop.sync()
         self.assertState(self.laptop, "skills", "failed", "its install exited 4")
+        self.assertState(self.laptop, "skills", "failed", "the file it added was moved to ~/.devcluster/state/removed/skills")
         self.assertEqual(self.installed("a.txt"), "a1\n")
         self.assertEqual(self.installed("b.txt"), "b1\n")
         self.assertFalse(self.laptop.path(".skills/demo/new").exists())
+        # Moved, not deleted: another agent might have made it.
+        aside = list(self.laptop.path(".devcluster/state/removed/skills").rglob("c.txt"))
+        self.assertEqual([p.read_text() for p in aside], ["added\n"])
 
     def test_a_repo_keeps_its_checkout_where_it_is_and_only_the_files_go_back(self):
         self.start(kind="repo")
@@ -149,7 +154,92 @@ class Installs(ClusterTest):
         # The install overwrote it, and devcluster had no copy of its own to put back: it stays.
         self.assertEqual(self.installed("a.txt"), "a1\n")
 
+    def test_putting_back_a_symlinked_folder_never_removes_files_through_it(self):
+        # The item's install had made ~/.skills/demo a link to a folder elsewhere. A failed
+        # install replaced the link with a real folder of new files. Putting the link back
+        # must not remove those files through it, from the folder it points to.
+        self.world.commit("skills", {"install.sh": textwrap.dedent('''\
+            #!/bin/sh
+            mkdir -p "$HOME/work/demo" "$HOME/.skills"
+            echo source > "$HOME/work/demo/SKILL.md"
+            ln -sfn "$HOME/work/demo" "$HOME/.skills/demo"
+            '''), "check.sh": "#!/bin/sh\ntrue\n"})
+        self.start(kind="repo")
+        self.assertTrue(self.laptop.path(".skills/demo").is_symlink())
+        self.world.commit("skills", {"install.sh": textwrap.dedent('''\
+            #!/bin/sh
+            rm -rf "$HOME/.skills/demo"
+            mkdir -p "$HOME/.skills/demo"
+            echo new > "$HOME/.skills/demo/SKILL.md"
+            exit 1
+            ''')})
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "failed", "its install exited 1")
+        self.assertTrue(self.laptop.path(".skills/demo").is_symlink())
+        self.assertEqual(self.laptop.path("work/demo/SKILL.md").read_text(), "source\n")
+
+    def test_a_commit_made_while_the_install_runs_is_left_where_it_is(self):
+        self.start()
+        tool = self.laptop.path("tools/skills")
+        self.world.commit("skills", {"skill/a.txt": "a2\n", "check.sh": BROKEN_CHECK + "\n"})
+        # The failing check is where an agent commits in the checkout, mid-install.
+        self.world.commit("skills", {"check.sh": textwrap.dedent(f'''\
+            #!/bin/sh
+            cd "{tool}" && echo mine > mine.txt && git add mine.txt && git commit --quiet -m mine
+            exit 1
+            ''')})
+        self.laptop.sync()
+        item = self.assertState(self.laptop, "skills", "failed", "while the install ran, so devcluster left it there")
+        self.assertEqual(self.laptop.git("tools/skills", "log", "-1", "--format=%s"), "mine")
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "blocked", "that origin doesn't have")
+
+    def test_going_back_is_tried_again_on_the_next_run_when_it_fails(self):
+        self.start()
+        good = self.head()
+        bad = self.world.commit("skills", {"check.sh": BROKEN_CHECK})
+        git_dir = self.laptop.path("tools/skills/.git")
+        path = wrap_git(self.laptop, '*" checkout --quiet --no-overwrite-ignore --detach "*',
+                        before=f'touch "{git_dir}/index.lock"', after=f'rm -f "{git_dir}/index.lock"')
+        self.laptop.sync(PATH=path)
+        self.assertState(self.laptop, "skills", "failed", f"couldn't go back to {good[:7]}")
+        self.assertEqual(self.head(), bad)
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "failed", f"went back to {good[:7]}, its last good commit, and installed it again")
+        self.assertEqual(self.head(), good)
+
+    def test_installing_the_good_commit_again_is_retried_until_it_works(self):
+        self.start()
+        good = self.head()
+        self.world.commit("skills", {"check.sh": BROKEN_CHECK})
+        self.laptop.path(".fail-install").write_text("")
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "failed", f"went back to {good[:7]}, its last good commit, but its install exited 9 there too")
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "failed", "but its install exited 9 there too")
+        self.laptop.path(".fail-install").unlink()
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "failed", f"stays on {good[:7]}, its last good commit, and installed it again")
+        self.assertEqual(self.installed("a.txt"), "a1\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "failed", f"stays on {good[:7]}, its last good commit: ")
+
     # Edits made by hand
+
+    def test_an_edit_the_install_left_alone_is_still_noticed_later(self):
+        self.start()
+        self.laptop.path(".skills/demo/a.txt").write_text("my fix\n")
+        # An install that only rewrites the file that changed.
+        self.world.commit("skills", {"skill/b.txt": "b2\n", "install.sh": '#!/bin/sh\ncp skill/b.txt "$HOME/.skills/demo/b.txt"\n', "check.sh": "#!/bin/sh\ntrue\n"})
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "changed", "ran its install")
+        self.assertEqual(self.installed("a.txt"), "my fix\n")
+        # A later install that does rewrite it keeps the edit first.
+        self.world.commit("skills", {"skill/a.txt": "a3\n", "install.sh": INSTALL})
+        self.laptop.sync()
+        self.assertState(self.laptop, "skills", "blocked", "(~/.skills/demo/a.txt)")
+        self.assertEqual(self.installed("a.txt"), "a3\n")
+        self.assertEqual(len(self.kept()), 1)
 
     def test_an_edit_is_kept_aside_the_install_goes_ahead_and_it_needs_you_until_dealt_with(self):
         self.start()
