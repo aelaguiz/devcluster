@@ -114,6 +114,22 @@ A command-line tool pinned to one version.
 
 The version must appear in the check's output as a whole word: `0.163.0` doesn't match `0.163.0-alpha.5`.
 
+### [[login]]
+
+Logins a tool keeps for itself, made on each machine. Use this for a login that can't be copied between machines: an OAuth login whose refresh token changes every time it's used signs both copies out the first time both renew it. Each machine makes its own instead, usually from a password the secrets repo carries.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | Its name |
+| `check` | yes | A command that exits 0 when every login the item keeps works on this machine. Its last line says what's missing, such as which identities have no login here. |
+| `login` | yes | A command that makes the missing logins |
+| `timeout` | no | Seconds for the check, default 60 |
+| `login_timeout` | no | Seconds for the login, default 1800 |
+
+devcluster runs the check every run, and the login when the check fails. When the check's line changes after a login, some logins were made, and the next run carries on: so a login command can make a few at a time. A login that leaves the check's line as it was is tried again after `retry_failed_after`, or at once if the check later reports something different, such as a new identity to log in.
+
+Neither command may print a credential. The check's last line is shown in `devcluster status` (with anything that looks like a token or password masked), so it should name only what's missing, and say the same thing until that changes.
+
 ### [[file]]
 
 A file from the config repo, put in place on each machine.
@@ -136,7 +152,7 @@ devcluster copies the file and remembers what it wrote. A target edited on the m
 | `engine` | none | A devcluster version for this machine only, so a new version can be tried on one machine first |
 | `skip` | none | Names of items in cluster.toml that don't apply here |
 
-A machine file can also hold `[secrets]`, `[[repo]]`, `[[tool]]`, `[[cli]]` and `[[file]]` items. An item with the same name as a shared one replaces it on this machine. Any other item is added. `on` has no meaning in a machine file.
+A machine file can also hold `[secrets]`, `[[repo]]`, `[[tool]]`, `[[cli]]`, `[[login]]` and `[[file]]` items. An item with the same name as a shared one replaces it on this machine. Any other item is added. `on` has no meaning in a machine file.
 
 ## fixer.toml
 

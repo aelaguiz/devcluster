@@ -1,4 +1,5 @@
-"""CLIs at a pinned version, the secrets repo, and files put in place from the config."""
+"""CLIs at a pinned version, logins each machine makes for itself, the secrets repo, and files
+put in place from the config."""
 
 import hashlib
 import os
@@ -8,12 +9,13 @@ import tempfile
 from ..context import result
 from ..git import Git, clone
 from ..paths import clock, expand
-from ..proc import shell, tail
+from ..proc import redact, shell, tail
 from ..results import BLOCKED, BUSY, CHANGED, FAILED, OK, WOULD_CHANGE, plural
 from .checkouts import CLONE_TIMEOUT, FAST_FORWARD, FETCH_TIMEOUT, _cleared, _prefix, _preflight, _update_failed, exchange, update
 
 CHECK_TIMEOUT = 60
 CLI_INSTALL_TIMEOUT = 1200
+LOGIN_TIMEOUT = 1800
 SECRETS_TIMEOUT = 600
 
 
@@ -57,6 +59,58 @@ def sync_cli(item, ctx):
         return result(item, FAILED, f"installed {version}, but its check still shows {now_found}")
     memory.clear()
     return result(item, CHANGED, f"installed {version} (had {found})")
+
+
+# Logins a tool keeps for itself on each machine. Some can't be copied from another machine:
+# an OAuth login whose refresh token changes each time it's used signs both copies out. So
+# each machine makes its own, with the item's commands, which never print a credential.
+
+
+def _said(ran):
+    """The last line a command printed, which is what status shows of a login item."""
+    for line in reversed((ran.out + "\n" + ran.err).splitlines()):
+        if line.strip():
+            return redact(line.strip())[:300]
+    return ""
+
+
+def _check_line(ran):
+    if ran.timed_out:
+        return "its check timed out"
+    return _said(ran) or ("its check passes" if ran.ok else f"its check exited {ran.code}")
+
+
+def sync_login(item, ctx):
+    home = os.path.expanduser("~")
+    timeout = item.get("timeout", CHECK_TIMEOUT)
+    memory = ctx.mem(item)
+    checked = shell(item.get("check"), cwd=home, timeout=timeout)
+    missing = _check_line(checked)
+    if checked.ok:
+        memory.clear()
+        return result(item, OK, missing)
+    # Logging in again right after a login that changed nothing would ask the same server the
+    # same thing every run. A change in what the check reports, such as a new login to make,
+    # is worth trying at once.
+    if memory.get("missing") == missing and ctx.now - memory.get("failed_at", 0) < ctx.retry_after:
+        retry = clock(memory["failed_at"] + ctx.retry_after)
+        return result(item, FAILED, f"{missing}; logging in failed at {clock(memory['failed_at'])}, and is tried again after {retry}", memory.get("failure", ""))
+    if ctx.dry_run:
+        return result(item, WOULD_CHANGE, f"{missing}; would log in")
+    ran = shell(item.get("login"), cwd=home, timeout=item.get("login_timeout", LOGIN_TIMEOUT))
+    failure = "" if ran.ok else tail(ran.err or ran.out)
+    again = shell(item.get("check"), cwd=home, timeout=timeout)
+    now_missing = _check_line(again)
+    if again.ok:
+        memory.clear()
+        return result(item, CHANGED, f"logged in; {now_missing}", failure)
+    if now_missing != missing:
+        # Some logins were made and others are still to come: the next run carries on.
+        memory.clear()
+        return result(item, CHANGED, f"logged in some; {now_missing}", failure)
+    how = "timed out" if ran.timed_out else f"exited {ran.code}" if not ran.ok else "changed nothing"
+    memory.update(missing=now_missing, failed_at=ctx.now, failure=failure)
+    return result(item, FAILED, f"{now_missing}; logging in {how}", failure)
 
 
 # Secrets. The repo's own commands do the decrypting; their output is never recorded,

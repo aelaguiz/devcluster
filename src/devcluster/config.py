@@ -7,8 +7,9 @@ from pathlib import Path, PurePosixPath
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-# The order a run works through the kinds: credentials first, since installs may need them.
-KINDS = ("secrets", "repo", "tool", "cli", "file")
+# The order a run works through the kinds: credentials first, since installs may need them,
+# and logins after the CLIs that keep them.
+KINDS = ("secrets", "repo", "tool", "cli", "login", "file")
 
 _COMMON = {"name", "on", "mode"}
 _INSTALLED = {"install", "check", "installs_into", "install_timeout"}
@@ -17,6 +18,7 @@ FIELDS = {
     "repo": ({"path", "url"}, {"branch", "timeout"} | _INSTALLED),
     "tool": ({"path", "url"}, {"ref", "timeout"} | _INSTALLED),
     "cli": ({"name", "version", "check", "install"}, {"timeout", "install_timeout"}),
+    "login": ({"name", "check", "login"}, {"timeout", "login_timeout"}),
     "file": ({"name", "source", "targets"}, set()),
 }
 SETTINGS = {
@@ -250,7 +252,7 @@ def _item(kind, entry, source, root, machine_names, errors, shared):
         errors.append(f"{where}: missing {key!r}")
         ok = False
     for key, value in entry.items():
-        if key in ("timeout", "install_timeout"):
+        if key in ("timeout", "install_timeout", "login_timeout"):
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 errors.append(f"{where}: {key} must be a whole number of seconds")
                 ok = False
