@@ -204,7 +204,7 @@ class HandOff(FixerTest):
     def test_stops_an_agent_that_runs_out_of_time(self):
         laptop = self.laptop
         self.block(laptop)
-        self.agent(laptop, 'echo $$ > "$HOME/agent.pid"; sleep 300')
+        self.agent(laptop, 'trap "" TERM; echo $$ > "$HOME/agent.pid"; sleep 300')  # ignores a polite stop
         laptop.sync(now=T0 + 120)
         laptop.sync(now=T0 + 240)
         pid_file = laptop.path("agent.pid")
@@ -228,6 +228,23 @@ class HandOff(FixerTest):
             self.fail("the agent kept running past its time limit")
         body = laptop.path("notified.txt").read_text()
         self.assertIn("ran out of time after 30 minutes", body)
+
+    def test_a_dry_run_never_stops_an_agent_and_turning_the_fixer_off_leaves_it_to_finish(self):
+        laptop = self.laptop
+        self.block(laptop)
+        self.agent(laptop, 'while [ ! -e "$HOME/go" ]; do sleep 0.1; done; rm notes2.txt')
+        laptop.sync(now=T0 + 120)
+        laptop.sync(now=T0 + 240)
+        laptop.sync("--dry-run", now=T0 + 240 + 1801)
+        self.assertState(laptop, "work", "busy")
+        self.recluster(fixer="# turned off\n")
+        laptop.sync(now=T0 + 600)
+        self.assertState(laptop, "work", "busy", "an agent has been fixing it since")
+        self.assertEqual(self.runs(laptop)[0].joinpath("exit").exists(), False, "the agent was stopped")
+        laptop.path("go").touch()
+        self.wait(laptop)
+        laptop.sync(now=T0 + 720)
+        self.assertState(laptop, "work", "changed")
 
     def test_a_failing_item_waits_before_it_is_handed_over(self):
         laptop = self.laptop
@@ -318,6 +335,45 @@ class Saving(FixerTest):
         self.assertIn("run.log", files)
         self.assertNotIn("other.log", files)
 
+    def test_what_was_staged_is_kept_when_the_file_changed_again(self):
+        path = self.checkout()
+        (path / "notes.txt").write_text("staged\n")
+        git(path, "add", "notes.txt")
+        (path / "notes.txt").write_text("changed again\n")
+        (path / "README.md").write_text("staged, then deleted\n")
+        git(path, "add", "README.md")
+        (path / "README.md").unlink()
+        saved = self.save(path)
+        self.assertEqual(git(path, "show", f"{saved['commit']}:notes.txt"), "changed again")
+        self.assertEqual(git(path, "show", f"{saved['commit']}^2:notes.txt"), "staged")
+        self.assertEqual(git(path, "show", f"{saved['commit']}^2:README.md"), "staged, then deleted")
+        self.assertEqual(git(path, "rev-parse", f"{saved['commit']}^1"), git(path, "rev-parse", "HEAD"))
+
+    def test_nothing_staged_means_one_parent(self):
+        path = self.checkout()
+        (path / "notes.txt").write_text("edited\n")
+        saved = self.save(path)
+        self.assertEqual(git(path, "rev-list", "--parents", "-n", "1", saved["commit"]).count(" "), 1)
+
+    def test_a_branch_that_cant_be_made_is_an_error_not_a_save(self):
+        path = self.checkout()
+        git(path, "branch", "devcluster")
+        (path / "new.txt").write_text("new\n")
+        saved = self.save(path)
+        self.assertNotIn("branch", saved)
+        self.assertIn("couldn't name a branch", saved["error"])
+
+    def test_ignored_files_are_copied_where_only_this_user_can_read_them(self):
+        self.world.commit("work", {".gitignore": "local/\n"})
+        path = self.checkout()
+        (path / "local").mkdir()
+        (path / "local" / "token").write_text("not a real token\n")
+        from devcluster.git import Git
+        folder = self.world.root / "copy" / "ignored-files"
+        self.assertEqual(fixers.copy_ignored(Git(path), folder), 1)
+        self.assertEqual((folder / "local" / "token").read_text(), "not a real token\n")
+        self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
+
     def test_a_refused_push_keeps_the_branch_here_and_says_so(self):
         hook = self.world.github / "work.git" / "hooks" / "pre-receive"
         hook.write_text("#!/bin/sh\necho 'file over the size limit' >&2\nexit 1\n")
@@ -389,6 +445,21 @@ class Rules(unittest.TestCase):
 
     def attempt(self, episode, outcome, fp=None):
         episode["attempts"].append({"at": self.fixer.now, "fp": fp or episode["fp"], "outcome": outcome, "summary": ""})
+
+    def test_the_owner_hears_once_however_the_status_line_rewords_it(self):
+        failing = ("installing 2.0.0 exited 1", "installing 2.0.0 failed at 10:02, and is tried again after 11:02")
+        self.run_once(state=FAILED, summary=failing[0], minutes=0)
+        for _ in range(40):
+            for summary in (failing[1], failing[1], failing[0]):
+                result = ItemResult("repo", "work", FAILED, summary, "mirror unreachable")
+                self.fixer.now += 120
+                self.fixer._track([result], set(), {"repo:work"})
+                self.fixer._hand_off([self.item], [result])
+                episode = self.fixer.state["episodes"]["repo:work"]
+                if self.started and len(episode["attempts"]) < len(self.started):
+                    self.attempt(episode, "could-not-fix")
+        self.assertEqual(len(self.started), 1, "the same failure reworded got a second agent")
+        self.assertEqual(len(self.told), 1)
 
     def test_digits_and_commit_ids_dont_make_a_new_problem(self):
         a = ItemResult("repo", "work", BLOCKED, "pulling 3 commits would overwrite notes.txt; now at 1a2b3c4")
@@ -491,6 +562,16 @@ class Watch(FixerTest):
             self.assertState(self.laptop, "server", "blocked", "can't be reached over SSH")
         self.assertEqual(self.messages(self.laptop), ["devcluster: server stopped reporting"])
         self.assertEqual(self.runs(self.laptop), [])
+
+    def test_no_neighbour_is_checked_when_the_reports_cant_be_fetched(self):
+        config = self.world.github / "config.git"
+        config.rename(config.with_name("config-away.git"))
+        try:
+            self.laptop.sync(now=T0 + 1500, PATH=self.path, DEVCLUSTER_SSH=self.ssh)
+        finally:
+            config.with_name("config-away.git").rename(config)
+        self.assertEqual([i for i in self.laptop.report()["items"] if i["kind"] == "machine"], [])
+        self.assertFalse(self.laptop.path("ssh.log").exists())
 
     def test_a_machine_that_isnt_watched_is_left_alone(self):
         self.recluster(fixer=self.fixer + "watched = false\n")

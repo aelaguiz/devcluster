@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import status
 from .git import Git
-from .paths import clock, engine_root, expand
+from .paths import clock, engine_root, expand, now as clock_now
 from .proc import run as run_command, tail
 from .results import BLOCKED, BUSY, CHANGED, FAILED, OK, ItemResult
 
@@ -34,6 +34,7 @@ MAX_WAITS = 6            # "someone is working there" this many times running, t
 MAX_STARTS = 3           # the agent command ending at once without a result, then the owner hears
 QUICK = 120              # seconds; an agent that ends sooner without a result never got going
 NOT_TRIES = ("waiting", "no-start")
+KEEP_RUNS = 30 * 86400   # run folders older than this are removed
 SKILL = engine_root() / "skills" / "devcluster-fixer" / "SKILL.md"
 
 
@@ -50,10 +51,13 @@ def _machine_setting(config, machine, key, default):
 
 
 def fingerprint(result):
-    """How an item is stuck, without the numbers that change from run to run."""
+    """How an item is stuck, without the numbers that change from run to run. The detail (the
+    files in the way, or the command's own output) names the problem when there is one; the
+    summary around it changes wording, such as an install that failed and then waits to retry."""
     def steady(text):
         return re.sub(r"\b[0-9a-f]{7,40}\b|\d+", "#", text or "")
-    return hashlib.sha256(f"{result.state}\n{steady(result.summary)}\n{steady(result.detail)}".encode()).hexdigest()[:16]
+    what = result.detail if (result.detail or "").strip() else result.summary
+    return hashlib.sha256(f"{result.state}\n{steady(what)}".encode()).hexdigest()[:16]
 
 
 def key_of(kind, name):
@@ -61,8 +65,9 @@ def key_of(kind, name):
 
 
 class Fixer:
-    def __init__(self, layout, ctx, config, machine, chosen):
+    def __init__(self, layout, ctx, config, machine, chosen, persist=None):
         self.layout = layout
+        self.persist = persist or (lambda: None)  # writes items.json, so a crash can't lose a started agent
         self.ctx = ctx
         self.config = config
         self.machine = machine
@@ -75,17 +80,23 @@ class Fixer:
 
     # Before the items run
 
-    def check(self):
+    def check(self, dry_run=False):
         """Finish off a fixer that has stopped. Returns the results to report, by item key,
-        for anything an agent is still working on, so the run leaves those items alone."""
+        for anything an agent is still working on, so the run leaves those items alone.
+        A dry run only reports; it never stops an agent or records what one did."""
         running = self.state.get("running")
+        if not dry_run:
+            self._prune(running)
         if not running:
             return {}
+        if dry_run:
+            return {running["key"]: self._busy(running)}
         if _alive(running):
             if self.now <= running["deadline"]:
                 return {running["key"]: self._busy(running)}
-            _stop(running)
-            minutes = round(self.settings["timeout"] / 60)
+            if not _stop(running):
+                return {running["key"]: self._busy(running, stopping=True)}
+            minutes = round((running["deadline"] - running["started"]) / 60)
             outcome = {"outcome": "could-not-fix", "summary": f"the fixer ran out of time after {minutes} minutes", "details": _log_tail(running)}
         else:
             outcome = _read_result(Path(running["dir"]) / "result.json")
@@ -99,10 +110,25 @@ class Fixer:
         self.state["running"] = None
         return {}
 
-    def _busy(self, running):
+    def _prune(self, running):
+        if not self.root.is_dir():
+            return
+        keep = Path(running["dir"]) if running else None
+        for folder in self.root.iterdir():
+            try:
+                # File times are the real clock's, so compare with the real clock.
+                old = folder.is_dir() and folder.name != "messages" and time.time() - folder.stat().st_mtime > KEEP_RUNS
+            except OSError:
+                continue
+            if old and folder != keep:
+                shutil.rmtree(folder, ignore_errors=True)
+
+    def _busy(self, running, stopping=False):
         kind, _, name = running["key"].partition(":")
         saved = running.get("saved") or {}
         where = f"; everything that was here is saved on branch {saved['branch']}" if saved.get("branch") else ""
+        if stopping:
+            return ItemResult(kind, name, BUSY, f"its agent ran out of time at {clock(running['deadline'])} and is still being stopped")
         if kind == "machine":
             return ItemResult("machine", name, BUSY, f"stopped reporting at {clock(running['quiet_since'])}; an agent has been checking it over SSH since {clock(running['started'])}")
         return ItemResult(kind, name, BUSY, f"an agent has been fixing it since {clock(running['started'])}{where}")
@@ -141,6 +167,8 @@ class Fixer:
     def after(self, plan, results):
         """Track stuck items, note recent fixes on their status lines, hand one stuck item to
         the fixer, and watch the neighbouring machine. Returns extra results to report."""
+        if not self.settings.get("command"):
+            return []  # turned off: an agent already running is still seen through by check()
         trial = {key_of(i.kind, i.name) for i in plan if i.get("mode") == "dry-run"}
         handled = [r for r in results if r.kind in HANDED and key_of(r.kind, r.name) not in trial]
         busy = {key_of(r.kind, r.name) for r in handled if r.state == BUSY}
@@ -185,8 +213,8 @@ class Fixer:
             episode = self.state["episodes"].get(key)
             if not episode or key not in items or result.state not in (BLOCKED, FAILED):
                 continue
-            if self.now < episode.get("next_try", 0) or episode.get("notified") == episode["fp"]:
-                continue
+            if self.now < episode.get("next_try", 0) or episode.get("notified"):
+                continue  # the owner hears once, and the item stays theirs until it syncs
             if episode["state"] == BLOCKED:
                 ready = episode["runs"] >= 2
             else:
@@ -198,7 +226,7 @@ class Fixer:
             owner = [a for a in tries if a["outcome"] == "needs-owner" and a["fp"] == episode["fp"]]
             if owner or len(tries) >= 2 or (tries and tries[-1]["fp"] == episode["fp"]) or len(waits) >= MAX_WAITS or _stalled(episode):
                 if self._notify_item(items[key], episode, owner[-1] if owner else None):
-                    episode["notified"] = episode["fp"]
+                    episode["notified"] = self.now
                 continue
             if self.state.get("running"):
                 continue
@@ -219,6 +247,11 @@ class Fixer:
                 "GIT_COMMITTER_NAME": "devcluster", "GIT_COMMITTER_EMAIL": "devcluster@localhost",
             }
             saved = save(Git(path, who), self.machine, item, self.now, in_way, push=item.kind != "secrets")
+            if item.kind == "secrets":
+                # Decrypted credentials are files Git ignores, so the saved commit doesn't hold
+                # them, and they must never reach a branch. A private copy keeps them instead.
+                folder = run_dir / "ignored-files"
+                saved["ignored"] = {"folder": str(folder), "count": copy_ignored(Git(path), folder)}
         brief = item_brief(self, item, episode, saved, run_dir, path)
         (run_dir / "brief.md").write_text(brief)
         cwd = path if path and path.is_dir() else Path.home()
@@ -231,12 +264,13 @@ class Fixer:
         return run_dir
 
     def _launch(self, key, run_dir, cwd, fp, **extra):
-        started, problem = launch(self.settings["command"], run_dir, cwd, key, self.now)
+        at = clock_now()  # not the run's start: the items before this may have taken a while
+        started, problem = launch(self.settings["command"], run_dir, cwd, key, at)
         running = {
             "key": key,
             "dir": str(run_dir),
-            "started": self.now,
-            "deadline": self.now + self.settings["timeout"],
+            "started": at,
+            "deadline": at + self.settings["timeout"],
             "fp": fp,
             **extra,
         }
@@ -245,6 +279,7 @@ class Fixer:
             return False
         running.update(started)
         self.state["running"] = running
+        self.persist()
         return True
 
     # Telling the owner
@@ -259,8 +294,6 @@ class Fixer:
             opening = f"The {label} on {self.machine} has been stuck since {_when(episode['since'])}. devcluster started an agent on it, and the agent couldn't fix it."
         lines = [opening, ""]
         lines += ["What devcluster says:", f"  {episode['summary']}", ""]
-        if owner_attempt and owner_attempt.get("message"):
-            lines += ["What the agent needs from you:", f"  {owner_attempt['message']}", ""]
         lines += _attempt_lines(episode)
         saved = next((a["saved"] for a in reversed(episode["attempts"]) if a.get("saved")), None)
         if saved and saved.get("branch"):
@@ -297,7 +330,9 @@ class Fixer:
         names = sorted(self.config.machines)
         if len(names) < 2:
             return []
-        reports, _ = status.read_all(self.layout)
+        reports, problem = status.read_all(self.layout)
+        if problem:
+            return []  # stale reports would make every machine look quiet to every other
         last = {name: (reports.get(name) or {}).get("finished") for name in names}
         last[self.machine] = self.now
         results = []
@@ -397,6 +432,9 @@ def save(git, machine, item, now, in_way=(), push=True):
             shutil.copyfile(index, copy)
         elif head:
             git.run("read-tree", head, env=env, timeout=600)
+        # What was staged, before the working tree is added over it. This fails when the index
+        # holds a conflict; then the working tree's version is what there is.
+        staged_tree = git.run("write-tree", env=env, timeout=600)
         added = git.run("add", "-A", "--sparse", env=env, timeout=3600)
         if not added.ok:
             return {"error": f"couldn't record the local files: {added.first_line()}"}
@@ -417,11 +455,19 @@ def save(git, machine, item, now, in_way=(), push=True):
         "its commits, uncommitted edits and untracked files. The engine changed nothing here.\n"
     )
     parents = ["-p", head] if head else []
+    head_tree = git.out("rev-parse", f"{head}^{{tree}}", timeout=60) if head else None
+    if staged_tree.ok and staged_tree.out.strip() not in (head_tree, tree.out.strip()):
+        # Staged, then changed again: the staged version is the second parent, as git stash keeps it.
+        staged = git.run("commit-tree", staged_tree.out.strip(), *parents, "-m", "What was staged", timeout=120)
+        if staged.ok:
+            parents += ["-p", staged.out.strip()]
     commit = git.run("commit-tree", tree.out.strip(), *parents, "-m", message, timeout=120)
     if not commit.ok:
         return {"error": f"couldn't make the saved commit: {commit.first_line()}"}
     sha = commit.out.strip()
-    git.run("update-ref", f"refs/heads/{branch}", sha, timeout=60)
+    named = git.run("update-ref", f"refs/heads/{branch}", sha, timeout=60)
+    if not named.ok:
+        return {"error": f"made the saved commit {sha[:10]} but couldn't name a branch for it: {named.first_line()}", "commit": sha}
     saved = {"branch": branch, "commit": sha, "pushed": False}
     if push:
         pushed = git.run("push", "--quiet", "origin", f"{sha}:refs/heads/{branch}", timeout=int(item.get("timeout", 600)))
@@ -431,6 +477,27 @@ def save(git, machine, item, now, in_way=(), push=True):
     else:
         saved["error"] = "it holds credentials, so it stays on this machine"
     return saved
+
+
+def copy_ignored(git, folder):
+    """Copy the files Git ignores in a checkout to a folder only this user can read. Returns how many."""
+    listed = git.run("ls-files", "-z", "--others", "--ignored", "--exclude-standard", timeout=600)
+    names = [name for name in listed.out.split("\0") if name] if listed.ok else []
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(folder, 0o700)
+    count = 0
+    for name in names[:5000]:
+        source = git.path / name
+        try:
+            if source.is_symlink() or not source.is_file() or source.stat().st_size > 50_000_000:
+                continue
+            target = folder / name
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            count += 1
+        except OSError:
+            continue
+    return count
 
 
 # Starting the agent
@@ -450,7 +517,7 @@ def launch(command, run_dir, cwd, key, now):
         # A systemd service stops everything it started when its run ends, so the fixer gets
         # a unit of its own.
         unit = f"devcluster-fixer-{re.sub(r'[^A-Za-z0-9]', '-', key)}-{int(now)}"
-        args = ["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}", f"--working-directory={cwd}"]
+        args = ["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}", f"--working-directory={cwd}", "--property=TimeoutStopSec=15"]
         for name in ("PATH", "HOME", "USER", "LOGNAME", "LANG", "DEVCLUSTER_HOME", "DEVCLUSTER_FIXER_BRIEF", "DEVCLUSTER_FIXER_RESULT", "DEVCLUSTER_FIXER_DIR"):
             if env.get(name):
                 args.append(f"--setenv={name}={env[name]}")
@@ -467,38 +534,60 @@ def launch(command, run_dir, cwd, key, now):
         )
     except OSError as error:
         return None, error.strerror
-    return {"pid": proc.pid}, None
+    return {"pid": proc.pid, "boot": boot_time()}, None
 
 
 def _alive(running):
+    """Whether anything the agent started is still running: its systemd unit, or on macOS any
+    process in its process group, which it can't leave without trying to."""
     if running.get("unit"):
         return run_command(["systemctl", "--user", "is-active", "--quiet", running["unit"]], timeout=30).ok
-    pid = running.get("pid")
-    if not pid:
-        return False
+    group = running.get("pid")
+    if not group or (running.get("boot") and running["boot"] != boot_time()):
+        return False  # after a restart the number may belong to someone else
     try:
-        os.kill(pid, 0)
+        os.killpg(group, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return False
-    shown = run_command(["ps", "-ww", "-o", "command=", "-p", str(pid)], timeout=30)
-    return shown.ok and running["dir"] in shown.out
+    return True
 
 
 def _stop(running):
+    """Stop the agent and everything it started. True once none of it is left."""
     if running.get("unit"):
         run_command(["systemctl", "--user", "stop", running["unit"]], timeout=60)
-        return
+        if _alive(running):
+            run_command(["systemctl", "--user", "kill", "--signal=SIGKILL", running["unit"]], timeout=30)
+            time.sleep(1)
+        return not _alive(running)
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(running["pid"], sig)
-        except (ProcessLookupError, PermissionError):
-            return
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
         for _ in range(20):
             if not _alive(running):
-                return
+                return True
             time.sleep(0.25)
+    return not _alive(running)
+
+
+def boot_time():
+    """When this machine last started, to tell a process from before a restart."""
+    try:
+        with open("/proc/stat") as stat:
+            for line in stat:
+                if line.startswith("btime "):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    shown = run_command(["sysctl", "-n", "kern.boottime"], timeout=10)
+    match = re.search(r"sec = (\d+)", shown.out)
+    return int(match.group(1)) if match else None
 
 
 def _stalled(episode):
@@ -568,6 +657,10 @@ def item_brief(fixer, item, episode, saved, run_dir, path):
         lines.append(f"- Tried to save this checkout to a branch and couldn't: {saved.get('error')}. Nothing here is saved, so don't remove anything you can't put back.")
     else:
         lines.append("- Nothing was saved: this item isn't a Git checkout devcluster can save.")
+    if saved and saved.get("ignored"):
+        lines.append(f"- Copied the {saved['ignored']['count']} files Git ignores here, such as the decrypted credentials, to {saved['ignored']['folder']}, which only this user can read. They are not on the saved branch, and must never be.")
+    elif saved and saved.get("branch"):
+        lines.append("- Files Git ignores, such as build output or a local .env, are not on the saved branch unless Git named them as in the way. Leave them where they are.")
     lines.append("- It leaves this item alone until you exit, then runs again. Don't run the engine yourself.")
     earlier = [a for a in episode.get("attempts", [])]
     if earlier:
@@ -673,7 +766,9 @@ def _how_worked(item):
 def _attempt_lines(episode):
     lines = []
     for attempt in episode.get("attempts", []):
-        lines.append(f"The fixer at {_when(attempt['at'])}: {attempt['outcome']}: {attempt['summary']}")
+        lines.append(f"The agent at {_when(attempt['at'])}: {attempt['outcome']}: {attempt['summary']}")
+        if attempt.get("message"):
+            lines += ["", f"What it needs from you: {attempt['message']}"]
         if attempt.get("details"):
             lines += ["", attempt["details"], ""]
     return lines + ([""] if lines else [])

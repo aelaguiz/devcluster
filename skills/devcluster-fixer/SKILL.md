@@ -14,9 +14,12 @@ The cluster's owner set this up so the machines look after themselves. A stuck i
 **Everything local is saved.** Before starting you, the engine wrote one commit holding the whole checkout and put it on the branch the brief names, `devcluster/saved/<machine>/<item>/<time>`. That commit holds:
 
 - the local commits, as its ancestors;
+- what was staged, as its second parent, when that differs from the working tree;
 - the uncommitted edits;
 - the untracked files;
 - any ignored files Git named as in the way.
+
+Other files Git ignores, such as build output or a local `.env`, are not in it, so leave them where they are. In the secrets checkout the brief names a private folder holding a copy of the decrypted files instead, which must never go on a branch.
 
 If the brief says the branch reached origin, nothing you change here can lose anything, even if this disk dies. If it stayed local, because origin refused something that large, it exists only on this disk. Then don't delete anything you could leave.
 
