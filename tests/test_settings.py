@@ -35,7 +35,7 @@ follow_folder = "~/shared"
 name = "codex-config"
 file = "~/.codex/config.toml"
 from = "laptop"
-own = ["projects", "hooks.state"]
+own = ["projects.*", "hooks.state.*"]
 
 [[settings]]
 name = "claude-servers"
@@ -51,8 +51,8 @@ from = "laptop"
 
 
 class Settings(ClusterTest):
-    def start(self, extra="", server_mode="on"):
-        self.world.config(ITEMS + extra, {"laptop": 'mode = "on"', "server": f'mode = "{server_mode}"'})
+    def start(self, extra="", server_mode="on", items=ITEMS):
+        self.world.config(items + extra, {"laptop": 'mode = "on"', "server": f'mode = "{server_mode}"'})
         self.laptop = self.world.machine("laptop")
         self.server = self.world.machine("server")
 
@@ -200,6 +200,17 @@ class Settings(ClusterTest):
         self.assertState(self.server, "claude-servers", "failed", "isn't valid JSON, so it was left alone")
         self.assertEqual(self.server.path(".claude.json").read_text(), "{not json")
 
+    def test_a_json_entry_the_machine_keeps(self):
+        self.start(items=ITEMS.replace('only = ["mcpServers"]\n', 'only = ["mcpServers"]\nown = ["mcpServers.neo"]\n'))
+        self.write(self.laptop, ".claude.json", json.dumps({"mcpServers": {"db": {}}}))
+        self.write(self.server, ".claude.json", json.dumps({"mcpServers": {"old": {}, "neo": {"url": "9010"}}, "theme": "dark"}))
+        self.laptop.sync()
+        self.carry()
+        self.server.sync()
+        self.assertEqual(json.loads(self.server.path(".claude.json").read_text()), {"mcpServers": {"db": {}, "neo": {"url": "9010"}}, "theme": "dark"})
+        self.server.sync()
+        self.assertState(self.server, "claude-servers", "ok", "matches laptop's copy")
+
     def test_a_key_the_laptop_drops_is_dropped(self):
         self.start()
         self.write(self.laptop, ".claude.json", json.dumps({"numStartups": 1}))
@@ -257,7 +268,7 @@ class Merge(ClusterTest):
     def test_brackets_inside_strings_and_arrays_are_not_tables(self):
         source = 'a = """\n[not.a.table]\n"""\nb = [\n[1, 2],\n]\n\n[projects."x"]\nt = 1\n\n[c]\nd = \'[e]\'\n'
         local = '[projects."y"]\nt = 2\n'
-        merged = settings.merge_toml(source, local, ["projects"])
+        merged = settings.merge_toml(source, local, ["projects.*"])
         data = tomllib.loads(merged)
         self.assertEqual(data["a"], "[not.a.table]\n")
         self.assertEqual(data["b"], [[1, 2]])
@@ -266,7 +277,7 @@ class Merge(ClusterTest):
 
     def test_extra_quotes_closing_a_string_and_quotes_in_a_comment(self):
         local = 'a = """a"""" # " """\nb = """\n[unterminated\n"""\n[projects.local]\ntrust_level = "trusted"\n'
-        merged = settings.merge_toml('[projects.source]\ntrust_level = "trusted"\n', local, ["projects"])
+        merged = settings.merge_toml('[projects.source]\ntrust_level = "trusted"\n', local, ["projects.*"])
         self.assertEqual(set(tomllib.loads(merged)["projects"]), {"source", "local"})
 
     def test_a_file_that_reads_but_cannot_be_split_is_left_alone(self):
@@ -280,14 +291,20 @@ class Merge(ClusterTest):
         settings.blocks = failing
         try:
             with self.assertRaises(settings.Unusable):
-                settings.merge_toml("[projects.source]\nt = 1\n", "[projects.local]\nt = 2\n", ["projects"])
+                settings.merge_toml("[projects.source]\nt = 1\n", "[projects.local]\nt = 2\n", ["projects.*"])
         finally:
             settings.blocks = original
+
+    def test_one_named_entry_is_kept_and_the_rest_is_the_sources(self):
+        source = '[mcp_servers.db]\nurl = "db"\n\n[mcp_servers.browser]\nurl = "9000"\n'
+        local = '[mcp_servers.old]\nurl = "old"\n\n[mcp_servers.neo]\nurl = "9010"\n\n[mcp_servers.neo.env]\nA = "1"\n'
+        data = tomllib.loads(settings.merge_toml(source, local, ["mcp_servers.neo"]))
+        self.assertEqual(data["mcp_servers"], {"db": {"url": "db"}, "browser": {"url": "9000"}, "neo": {"url": "9010", "env": {"A": "1"}}})
 
     def test_a_machines_own_entry_replaces_the_sources_whole(self):
         source = '[projects."x"]\nt = 1\n\n[projects."x".deep]\nu = 1\n\n[other]\nv = 1\n'
         local = '[projects."x"]\nt = 9\n'
-        data = tomllib.loads(settings.merge_toml(source, local, ["projects"]))
+        data = tomllib.loads(settings.merge_toml(source, local, ["projects.*"]))
         self.assertEqual(data["projects"], {"x": {"t": 9}})
         self.assertEqual(data["other"], {"v": 1})
 
@@ -310,7 +327,8 @@ class Validation(ClusterTest):
         self.assertIn("give either a version or from", self.check(neither))
 
     def test_settings_fields_fit_the_file(self):
-        self.assertIn("isn't one", self.check('[devcluster]\nfollow_folder = "~/s"\n[[settings]]\nname = "s"\nfile = "~/a.json"\nfrom = "laptop"\nown = ["projects"]\n'))
+        self.assertIn("own names entries in a TOML or JSON file", self.check('[devcluster]\nfollow_folder = "~/s"\n[[settings]]\nname = "s"\nfile = "~/a.py"\nfrom = "laptop"\nown = ["projects.*"]\n'))
+        self.assertIn("with * for any one key", self.check('[devcluster]\nfollow_folder = "~/s"\n[[settings]]\nname = "s"\nfile = "~/a.toml"\nfrom = "laptop"\nown = ["projects.a b"]\n'))
         self.assertIn("only names the keys", self.check('[devcluster]\nfollow_folder = "~/s"\n[[settings]]\nname = "s"\nfile = "~/a.toml"\nfrom = "laptop"\nonly = ["k"]\n'))
         self.assertIn("which has no machines/desk.toml", self.check('[devcluster]\nfollow_folder = "~/s"\n[[settings]]\nname = "s"\nfile = "~/a.toml"\nfrom = "desk"\n'))
         self.assertIn("needs follow_folder", self.check('[[settings]]\nname = "s"\nfile = "~/a.toml"\nfrom = "laptop"\n'))

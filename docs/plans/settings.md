@@ -14,7 +14,7 @@ One machine is the source. Its files are the truth, every other machine's files 
 
 | File | What the other machines get | What each machine keeps |
 |---|---|---|
-| `~/.codex/config.toml` | Everything: model, thinking level, approvals, MCP servers, hooks, plugins, profiles | `projects`, the folders Codex has trusted on that machine, and `hooks.state`, the hooks it has approved there |
+| `~/.codex/config.toml` | Everything: model, thinking level, approvals, MCP servers, hooks, plugins, profiles | `projects.*`, the folders Codex has trusted on that machine, and `hooks.state.*`, the hooks it has approved there |
 | `~/.claude/settings.json` | Everything | Nothing |
 | `~/.claude.json` | `mcpServers` | Everything else: the sign-in, each project's history, counters |
 | A file the settings run, such as a Codex hook script | The file | Nothing |
@@ -22,12 +22,14 @@ One machine is the source. Its files are the truth, every other machine's files 
 
 Kept entries merge: an entry the source has and the machine doesn't is added; an entry both have stays as the machine has it. A Codex hook approval is a hash of the hook as written on that machine, so the source's approval is wrong wherever the home folder differs. Keeping the machine's own approval means an approval made there isn't overwritten at the next run.
 
+A machine can also keep single entries a program there writes for itself. In the setup this comes from, one machine runs a different browser build that registers its own MCP server in both CLIs' files every two minutes. Removing it each run would have the browser come and go for that machine's agents, so that machine's file lists the entry in `own`.
+
 ## How it works
 
 - **A new kind, `[[settings]]`**, names the file, `from` (the source machine), and `own` or `only`. [Config reference](../config.md#settings).
 - **On the source**, each run reads the file and, if it parses, saves a copy in `follow_folder`, a folder inside the encrypted secrets repo, which already travels to every machine every two minutes. These files hold tokens, so they never sit in the config repo. A file that doesn't parse isn't saved, so the others keep the last good copy.
 - **Home paths** are written as `{{home}}` in the copy and turned into each machine's own home folder, so a machine with a different user name, or Linux's `/home`, gets working paths.
-- **On every other machine**, each run builds the file it should have (the copy, plus its own entries) and replaces the file when it differs. For TOML, the source's text is spliced, so comments and layout survive, and the result is parsed and compared with what the merge should hold before anything is written. A file that is a link, because an agent launcher owns the real one, is written through the link. The first replacement keeps the old file in `~/.devcluster/state/settings/NAME.before`.
+- **On every other machine**, each run builds the file it should have (the copy, plus its own entries) and replaces the file when it differs. For TOML, the source's text is spliced, so comments and layout survive, and the result is parsed and compared with what the merge should hold before anything is written. A file that is a link is written through the link, so the link stays. If another program, such as Claude Code, saves the file while devcluster works on it, nothing is written and the next run starts over. The first replacement keeps the old file in `~/.devcluster/state/settings/NAME.before`.
 - **A CLI with `from`** installs the source's version: the source saves the version its check shows, and the others install it with their own `install` command, since each machine installed Codex its own way.
 - **Timing**: a change on the source is saved at its next run and sent at the one after; each other machine applies it at its next run after that. About six minutes, ten at most.
 

@@ -23,7 +23,7 @@ FIELDS = {
     "file": ({"name", "source", "targets"}, set()),
     "settings": ({"name", "file", "from"}, {"own", "only"}),
 }
-DOTTED = re.compile(r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$")
+DOTTED = re.compile(r"^([A-Za-z0-9_-]+|\*)(\.([A-Za-z0-9_-]+|\*))*$")
 SETTINGS = {
     "engine": str,
     "heartbeat": int,
@@ -285,18 +285,15 @@ def _item(kind, entry, source, root, machine_names, errors, shared):
         ok = False
     if kind == "settings" and ok:
         suffix = PurePosixPath(entry["file"]).suffix
-        if "own" in entry and "only" in entry:
-            errors.append(f"{where}: own is for a TOML file and only for a JSON file, so give one")
+        if "own" in entry and suffix not in (".toml", ".json"):
+            errors.append(f"{where}: own names entries in a TOML or JSON file; {entry['file']} isn't one")
             ok = False
-        elif "own" in entry and suffix != ".toml":
-            errors.append(f"{where}: own names tables a machine keeps in a TOML file; {entry['file']} isn't one")
-            ok = False
-        elif "only" in entry and suffix != ".json":
+        if "only" in entry and suffix != ".json":
             errors.append(f"{where}: only names the keys copied in a JSON file; {entry['file']} isn't one")
             ok = False
         for name in entry.get("own", []):
             if not DOTTED.match(name):
-                errors.append(f"{where}: own names tables by their keys joined with dots, such as \"hooks.state\"; {name!r} isn't one")
+                errors.append(f"{where}: own names entries by their keys joined with dots, with * for any one key, such as \"projects.*\"; {name!r} isn't one")
                 ok = False
     if not ok:
         return None

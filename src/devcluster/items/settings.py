@@ -1,6 +1,6 @@
 """Settings files copied from one machine, such as an agent CLI's config. The source machine saves
 its file; every other machine's file is replaced with that copy, apart from the entries `own`
-keeps (a TOML file) or the keys `only` limits it to (a JSON file)."""
+names, which each machine keeps as it has them, and, in a JSON file, the keys outside `only`."""
 
 import json
 import os
@@ -112,19 +112,23 @@ def _wanted(item, shared, current, source):
             return merge_toml(shared, current, item.get("own"), source)
         _toml(shared, f"{source}'s copy isn't valid TOML")
         return shared
-    if kind == "json" and item.get("only"):
+    if kind == "json" and (item.get("only") or item.get("own")):
         chosen = _json(shared, f"{source}'s copy isn't valid JSON")
         data = _json(current, "this machine's copy isn't valid JSON, so it was left alone") if current else {}
         if not isinstance(data, dict) or not isinstance(chosen, dict):
             raise Unusable("this machine's copy isn't a JSON object, so it was left alone")
-        if all(data.get(key) == chosen.get(key) and (key in data) == (key in chosen) for key in item.get("only")):
-            return current
-        for key in item.get("only"):
-            if key in chosen:
-                data[key] = chosen[key]
-            else:
-                data.pop(key, None)
-        return json.dumps(data, indent=2, ensure_ascii=False)
+        if item.get("only"):
+            wanted = _copy(data)
+            for key in item.get("only"):
+                if key in chosen:
+                    wanted[key] = _copy(chosen[key])
+                else:
+                    wanted.pop(key, None)
+        else:
+            wanted = _copy(chosen)
+        for path in _own_paths([data], _patterns(item.get("own", []))):
+            _put(wanted, path, _copy(_at(data, path)[1]))
+        return current if wanted == data else json.dumps(wanted, indent=2, ensure_ascii=False)
     if kind == "json":
         _json(shared, f"{source}'s copy isn't valid JSON")
     return shared
@@ -175,7 +179,7 @@ class Block:
 
 
 def merge_toml(source_text, local_text, own, source="the source"):
-    prefixes = [tuple(name.split(".")) for name in own]
+    patterns = _patterns(own)
     source_data = _toml(source_text, f"{source}'s copy isn't valid TOML")
     source_blocks = blocks(source_text)
     local_data, local_blocks = {}, []
@@ -191,10 +195,9 @@ def merge_toml(source_text, local_text, own, source="the source"):
                 raise Unusable("this machine's file is laid out in a way devcluster can't split into tables, so it was left alone") from None
 
     def entry(block):
-        for prefix in prefixes:
-            if len(block.path) > len(prefix) and block.path[: len(prefix)] == prefix:
-                return block.path[: len(prefix) + 1]
-        return None
+        """The own entry a table belongs to: the shortest start of its keys that a name matches."""
+        found = [block.path[: len(p)] for p in patterns if _matches(p, block.path)]
+        return min(found, key=len) if found else None
 
     local_entries = {}
     for block in local_blocks:
@@ -215,7 +218,7 @@ def merge_toml(source_text, local_text, own, source="the source"):
             chosen += entries
 
     text = _join(chosen)
-    expected = _expected(source_data, local_data, prefixes)
+    expected = _expected(source_data, local_data, patterns)
     try:
         merged = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
@@ -263,25 +266,60 @@ def _join(chosen):
     return text
 
 
-def _expected(source_data, local_data, prefixes):
+def _expected(source_data, local_data, patterns):
+    """What the merge should hold: the source's data, with each own entry the machine has."""
     expected = _copy(source_data)
-    for prefix in prefixes:
-        mine, theirs = _get(source_data, prefix), _get(local_data, prefix)
-        if mine is None and theirs is None:
-            continue
-        node = expected
-        for key in prefix[:-1]:
-            node = node.setdefault(key, {})
-        node[prefix[-1]] = {**(mine or {}), **(theirs or {})}
+    for path in _own_paths([source_data, local_data], patterns):
+        found, value = _at(local_data, path)
+        if found:
+            _put(expected, path, _copy(value))
     return expected
 
 
-def _get(data, path):
+# Own entries are named by their keys joined with dots, where `*` stands for any one key:
+# "projects.*" is each trusted folder, "mcp_servers.browser" one server.
+
+
+def _patterns(own):
+    return [tuple(name.split(".")) for name in own]
+
+
+def _matches(pattern, path):
+    return len(path) >= len(pattern) and all(want in ("*", key) for want, key in zip(pattern, path))
+
+
+def _own_paths(datas, patterns):
+    """Every entry the names match in any of the data, leaving out one inside another."""
+    found = set()
+    for data in datas:
+        for pattern in patterns:
+            found.update(_walk(data, pattern))
+    return sorted(path for path in found if not any(path[: n] in found for n in range(1, len(path))))
+
+
+def _walk(node, pattern, path=()):
+    if not pattern:
+        return [path]
+    if not isinstance(node, dict):
+        return []
+    keys = list(node) if pattern[0] == "*" else [pattern[0]] if pattern[0] in node else []
+    return [found for key in keys for found in _walk(node[key], pattern[1:], path + (key,))]
+
+
+def _at(data, path):
     for key in path:
         if not isinstance(data, dict) or key not in data:
-            return None
+            return False, None
         data = data[key]
-    return data if isinstance(data, dict) else None
+    return True, data
+
+
+def _put(data, path, value):
+    for key in path[:-1]:
+        if not isinstance(data.get(key), dict):
+            data[key] = {}
+        data = data[key]
+    data[path[-1]] = value
 
 
 def _copy(data):

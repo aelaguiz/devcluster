@@ -44,7 +44,7 @@ install = "npm install -g @openai/codex@{version}"
 name = "codex-config"
 file = "~/.codex/config.toml"
 from = "laptop"
-own = ["projects"]
+own = ["projects.*"]
 
 # Only the MCP servers: the rest of this file is each machine's own state.
 [[settings]]
