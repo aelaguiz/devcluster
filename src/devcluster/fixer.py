@@ -26,7 +26,7 @@ from .proc import run as run_command, tail
 from .results import BLOCKED, BUSY, CHANGED, FAILED, OK, ItemResult
 
 CHECKOUTS = ("repo", "tool", "secrets")
-HANDED = ("repo", "tool", "secrets", "cli", "file")
+HANDED = ("repo", "tool", "secrets", "cli", "file", "settings")
 OUTCOMES = ("fixed", "waiting", "needs-owner", "could-not-fix")
 DEFAULTS = {"timeout": 1800, "wait": 1800, "failed_after": 1800, "quiet_after": 1200}
 NOTE_FOR = 24 * 3600     # how long a fixed item's status line says an agent fixed it
@@ -758,8 +758,12 @@ def _how_worked(item):
         return f"followed at {item.get('ref', 'its default branch')}; nobody edits it here, and devcluster updates it and runs its install"
     if item.kind == "secrets":
         return "the credentials checkout; never print a secret value"
+    if item.kind == "cli" and item.get("from"):
+        return f"a command-line tool devcluster installs at the version {item.get('from')} has"
     if item.kind == "cli":
         return "a command-line tool devcluster installs at a set version"
+    if item.kind == "settings":
+        return f"a settings file copied from {item.get('from')}, the machine the others follow; devcluster replaces this machine's file with that copy"
     return "a file the config puts in place on this machine"
 
 

@@ -46,7 +46,9 @@ def _check_config(args):
         mode = "syncs for real" if machine.mode == "on" else "dry run"
         print(f"\n{name} ({mode}):")
         for item in loaded.plan(name):
-            where = item.get("path") or ", ".join(item.get("targets", [])) or item.get("version", "")
+            where = item.get("path") or item.get("file") or ", ".join(item.get("targets", [])) or item.get("version", "")
+            if item.get("from"):
+                where = f"{where}, copied from {item.get('from')}" if where else f"the version {item.get('from')} has"
             trial = " (tried in dry run)" if item.get("mode") == "dry-run" and machine.mode == "on" else ""
             print(f"  {item.kind} {item.name}: {where}{trial}")
     return 0

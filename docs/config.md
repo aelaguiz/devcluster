@@ -28,6 +28,7 @@ Paths can start with `~`, which means the home folder of whoever runs devcluster
 | `stale_after` | 900 | Seconds without a report before `status` calls a machine stale. |
 | `retry_failed_after` | 3600 | Seconds before a failed install is tried again at the same version. |
 | `git_name`, `git_email` | the repo's own identity | Who merge commits are made as. |
+| `follow_folder` | none | Where a machine that others copy leaves its copies for them, one file per item. Something else must carry this folder to every machine; a folder inside the secrets repo does, encrypted, which matters because settings files can hold tokens. Required when any item has `from`. |
 
 ### Fields every item can have
 
@@ -101,18 +102,19 @@ Whether or not it has `installs_into`, when a tool's install or check fails, the
 
 ### [[cli]]
 
-A command-line tool pinned to one version.
+A command-line tool at one version: a version written here, or whatever version one machine has.
 
 | Field | Required | Meaning |
 |---|---|---|
 | `name` | yes | Its name |
-| `version` | yes | The version every machine should have |
+| `version` | one of these two | The version every machine should have |
+| `from` | one of these two | The machine whose version every other machine installs. On that machine devcluster installs nothing: it reads the version from the check and saves it in `follow_folder`. Upgrading there is how a new version reaches the others. |
 | `check` | yes | A command whose output includes the installed version |
 | `install` | yes | A command that installs it. `{version}` is replaced with the version. |
 | `timeout` | no | Seconds for the check, default 60 |
 | `install_timeout` | no | Seconds for the install, default 1200 |
 
-The version must appear in the check's output as a whole word: `0.163.0` doesn't match `0.163.0-alpha.5`.
+The version must appear in the check's output as a whole word: `0.163.0` doesn't match `0.163.0-alpha.5`. When machines installed the tool in different ways, give each one's `install` and `check` in its machine file.
 
 ### [[login]]
 
@@ -142,6 +144,20 @@ A file from the config repo, put in place on each machine.
 
 devcluster copies the file and remembers what it wrote. A target edited on the machine since then is reported, not overwritten. A different file already at a target the first time is moved aside to `NAME.before-devcluster`.
 
+### [[settings]]
+
+A settings file copied from one machine, such as an agent CLI's config: you change settings on the machine you work on, and every other machine gets them. That machine's file is the truth, and the others' files are replaced with it.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | Its name, also the name of its copy in `follow_folder` |
+| `file` | yes | The file, such as `~/.codex/config.toml` |
+| `from` | yes | The machine the others copy |
+| `own` | no | For a TOML file: tables each machine keeps as its own, such as `["projects"]` for the folders a CLI has trusted on that machine. An entry in one of these tables stays as the machine has it; an entry only the source has is added. |
+| `only` | no | For a JSON file: the top-level keys copied, such as `["mcpServers"]`. The rest of the file is the machine's own. |
+
+On the source machine, each run saves a copy of the file in `follow_folder`, with its home folder written as `{{home}}`. A file that doesn't parse isn't saved, so the others keep the last copy. On every other machine, the file is replaced with the copy, with `{{home}}` turned into that machine's home folder, so a machine with a different user name gets its own paths. A file that is a link, because another program owns the real file, is written through the link. The first time devcluster replaces a machine's file, the file as it was is kept in `~/.devcluster/state/settings/NAME.before`. After that, an edit made on the machine is replaced at the next run.
+
 ## machines/NAME.toml
 
 | Key | Default | Meaning |
@@ -152,7 +168,7 @@ devcluster copies the file and remembers what it wrote. A target edited on the m
 | `engine` | none | A devcluster version for this machine only, so a new version can be tried on one machine first |
 | `skip` | none | Names of items in cluster.toml that don't apply here |
 
-A machine file can also hold `[secrets]`, `[[repo]]`, `[[tool]]`, `[[cli]]`, `[[login]]` and `[[file]]` items. An item with the same name as a shared one replaces it on this machine. Any other item is added. `on` has no meaning in a machine file.
+A machine file can also hold `[secrets]`, `[[repo]]`, `[[tool]]`, `[[cli]]`, `[[login]]`, `[[file]]` and `[[settings]]` items. An item with the same name as a shared one replaces it on this machine. Any other item is added. `on` has no meaning in a machine file.
 
 ## fixer.toml
 
