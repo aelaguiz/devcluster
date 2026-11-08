@@ -1,5 +1,5 @@
-"""CLIs at a pinned version, logins each machine makes for itself, the secrets repo, and files
-put in place from the config."""
+"""CLIs at a pinned version or at the version one machine has, logins each machine makes for
+itself, the secrets repo, and files put in place from the config."""
 
 import hashlib
 import os
@@ -11,6 +11,7 @@ from ..git import Git, clone
 from ..paths import clock, expand
 from ..proc import redact, shell, tail
 from ..results import BLOCKED, BUSY, CHANGED, FAILED, OK, WOULD_CHANGE, plural
+from . import follow
 from .checkouts import CLONE_TIMEOUT, FAST_FORWARD, FETCH_TIMEOUT, _cleared, _prefix, _preflight, _update_failed, exchange, update
 
 CHECK_TIMEOUT = 60
@@ -22,23 +23,36 @@ SECRETS_TIMEOUT = 600
 # CLIs
 
 
+VERSION = re.compile(r"\d+\.\d+(?:\.\d+)?(?:[-+][\w.+-]*)?")
+
+
 def has_version(output, version):
     """True when the version appears as a whole word: 0.163.0 doesn't match 0.163.0-alpha.5."""
     return re.search(rf"(?<![\w.+-]){re.escape(version)}(?![\w.+-])", output) is not None
 
 
 def _found(output):
-    match = re.search(r"\d+\.\d+(?:\.\d+)?(?:[-+][\w.+-]*)?", output)
+    match = VERSION.search(output)
     return match.group(0) if match else "no version"
 
 
 def sync_cli(item, ctx):
     version = item.get("version")
     timeout = item.get("timeout", CHECK_TIMEOUT)
+    source = item.get("from")
+    if source and follow.is_source(ctx, item):
+        return _share_version(item, ctx, timeout)
+    if source:
+        shared = follow.read_copy(ctx, item)
+        if shared is None:
+            return result(item, BUSY, f"waiting for {source}'s version to arrive in {follow.copy_path(ctx, item)}")
+        version = shared.strip()
+        if not VERSION.fullmatch(version):
+            return result(item, FAILED, f"{source}'s copy holds {version[:40]!r}, which isn't a version")
     checked = shell(item.get("check"), cwd=os.path.expanduser("~"), timeout=timeout)
     output = checked.out + "\n" + checked.err
     if checked.ok and has_version(output, version):
-        return result(item, OK, f"at {version}")
+        return result(item, OK, f"at {version}, the same as {source}" if source else f"at {version}")
     found = _found(output) if checked.ok else "not installed"
     memory = ctx.mem(item)
     if memory.get("failed") == version and ctx.now - memory.get("failed_at", 0) < ctx.retry_after:
@@ -59,6 +73,21 @@ def sync_cli(item, ctx):
         return result(item, FAILED, f"installed {version}, but its check still shows {now_found}")
     memory.clear()
     return result(item, CHANGED, f"installed {version} (had {found})")
+
+
+def _share_version(item, ctx, timeout):
+    """On the machine the others follow: save the version installed here for them."""
+    checked = shell(item.get("check"), cwd=os.path.expanduser("~"), timeout=timeout)
+    version = _found(checked.out + "\n" + checked.err) if checked.ok else None
+    if not version or version == "no version":
+        how = "timed out" if checked.timed_out else f"exited {checked.code}" if not checked.ok else "shows no version"
+        return result(item, FAILED, f"its check {how}, so the other machines keep the last version", tail(checked.err or checked.out))
+    if (follow.read_copy(ctx, item) or "").strip() == version:
+        return result(item, OK, f"at {version}; the other machines follow it")
+    if ctx.dry_run:
+        return result(item, WOULD_CHANGE, f"at {version}; would save it for the other machines")
+    follow.save_copy(ctx, item, version + "\n")
+    return result(item, CHANGED, f"at {version}; saved it for the other machines")
 
 
 # Logins a tool keeps for itself on each machine. Some can't be copied from another machine:

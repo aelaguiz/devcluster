@@ -75,7 +75,7 @@ Everything sync keeps in step is an item of some kind. Every kind follows the sa
 3. Check the result.
 4. Report one of the six states, with a sentence.
 
-An item can't block or break another item. The six kinds today are secrets, repos, tools, CLIs, logins and files. A new kind (a Homebrew bundle, an MCP server registration, a launchd service) is one more handler with the same contract. An engine refuses a config with a kind it doesn't know, and then can't update itself, so every machine moves to the engine that has a new kind before the config uses it.
+An item can't block or break another item. The seven kinds today are secrets, repos, tools, CLIs, logins, files and settings copied from one machine. A new kind (a Homebrew bundle, an MCP server registration, a launchd service) is one more handler with the same contract. An engine refuses a config with a kind it doesn't know, and then can't update itself, so every machine moves to the engine that has a new kind before the config uses it.
 
 ### Reports
 
@@ -93,6 +93,7 @@ Reports grow as the parts below arrive: free space, load and memory for placemen
 | [#3](https://github.com/aelaguiz/devcluster/issues/3) Skills and tools | A check after each install, keeping installed copies that were edited by hand, and going back to the last good version when an install fails ([plan](plans/tools.md)) |
 | [#4](https://github.com/aelaguiz/devcluster/issues/4) Credentials | Saying which tool needs which credential, so a missing one is named in the report. Some sign-ins can't be copied (a keychain, a browser profile), so those are reported as missing, never copied |
 | [#5](https://github.com/aelaguiz/devcluster/issues/5) CLI versions | Fetching an approved build from storage by its hash when the CLI isn't installed from a package manager |
+| [#20](https://github.com/aelaguiz/devcluster/issues/20) Agent settings | Codex and Claude Code settings, and Codex's version, copied from the machine its owner works on ([plan](plans/settings.md)) |
 | [#6](https://github.com/aelaguiz/devcluster/issues/6) Rules files | The global agent instructions and the where-work-goes guide moved into `files/`, with every other copy retired |
 
 ### Putting work where there's room (#7)

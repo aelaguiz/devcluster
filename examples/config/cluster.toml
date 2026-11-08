@@ -4,6 +4,8 @@
 [devcluster]
 # The devcluster version every machine runs: a tag or a full commit ID.
 # engine = "v0.1.0"
+# Where a machine the others copy leaves its copies: inside the secrets repo, so they travel encrypted.
+follow_folder = "~/workspace/secrets/local/devcluster"
 
 # A repo agents commit to directly on main: synced both ways on every machine.
 [[repo]]
@@ -28,12 +30,28 @@ check = "make verify_install"
 # Where the install writes: an installed file edited here is kept, not lost.
 installs_into = ["~/.claude/skills", "~/.agents/skills"]
 
-# A command-line tool pinned to one version.
+# A command-line tool pinned to one version. With from = "laptop" instead of a version, every
+# machine installs the version the laptop has.
 [[cli]]
 name = "codex"
 version = "0.163.0"
 check = "codex --version"
 install = "npm install -g @openai/codex@{version}"
+
+# Settings copied from the machine you work on. Each machine keeps the folders it has trusted;
+# everything else is the laptop's. The copy travels in follow_folder, set in [devcluster].
+[[settings]]
+name = "codex-config"
+file = "~/.codex/config.toml"
+from = "laptop"
+own = ["projects.*"]
+
+# Only the MCP servers: the rest of this file is each machine's own state.
+[[settings]]
+name = "claude-mcp-servers"
+file = "~/.claude.json"
+from = "laptop"
+only = ["mcpServers"]
 
 # An encrypted secrets repo, driven by its own commands.
 [secrets]

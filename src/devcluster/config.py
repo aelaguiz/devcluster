@@ -8,8 +8,9 @@ from pathlib import Path, PurePosixPath
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # The order a run works through the kinds: credentials first, since installs may need them,
-# and logins after the CLIs that keep them.
-KINDS = ("secrets", "repo", "tool", "cli", "login", "file")
+# and logins after the CLIs that keep them. Settings copied from one machine travel in the
+# secrets repo, so they come after it.
+KINDS = ("secrets", "repo", "tool", "cli", "login", "file", "settings")
 
 _COMMON = {"name", "on", "mode"}
 _INSTALLED = {"install", "check", "installs_into", "install_timeout"}
@@ -17,10 +18,12 @@ FIELDS = {
     "secrets": ({"path", "url", "check", "decrypt"}, {"branch", "timeout", "publish"}),
     "repo": ({"path", "url"}, {"branch", "timeout"} | _INSTALLED),
     "tool": ({"path", "url"}, {"ref", "timeout"} | _INSTALLED),
-    "cli": ({"name", "version", "check", "install"}, {"timeout", "install_timeout"}),
+    "cli": ({"name", "check", "install"}, {"version", "from", "timeout", "install_timeout"}),
     "login": ({"name", "check", "login"}, {"timeout", "login_timeout"}),
     "file": ({"name", "source", "targets"}, set()),
+    "settings": ({"name", "file", "from"}, {"own", "only"}),
 }
+DOTTED = re.compile(r"^([A-Za-z0-9_-]+|\*)(\.([A-Za-z0-9_-]+|\*))*$")
 SETTINGS = {
     "engine": str,
     "heartbeat": int,
@@ -28,6 +31,7 @@ SETTINGS = {
     "retry_failed_after": int,
     "git_name": str,
     "git_email": str,
+    "follow_folder": str,  # where the machine an item copies leaves its copy for the others
 }
 MODES = ("dry-run", "on")
 
@@ -134,6 +138,10 @@ def load(root):
         machines[path.stem] = _machine(path.stem, data, root, shared_names, machine_names, errors)
 
     fixer, fixer_machines = _fixer(root / "fixer.toml", machine_names, errors)
+
+    followers = [item for item in items + [i for m in machines.values() for i in m.items] if item.get("from")]
+    if followers and not settings.get("follow_folder"):
+        errors.append(f"cluster.toml: {followers[0].kind} {followers[0].name} copies {followers[0].get('from')}, so [devcluster] needs follow_folder: a folder every machine shares, such as one in the secrets repo")
 
     if errors:
         raise ConfigError(errors)
@@ -256,7 +264,7 @@ def _item(kind, entry, source, root, machine_names, errors, shared):
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 errors.append(f"{where}: {key} must be a whole number of seconds")
                 ok = False
-        elif key in ("on", "targets", "installs_into"):
+        elif key in ("on", "targets", "installs_into", "own", "only"):
             if not isinstance(value, list) or not value or not all(isinstance(v, str) and v for v in value):
                 errors.append(f"{where}: {key} must be a list of names")
                 ok = False
@@ -272,7 +280,25 @@ def _item(kind, entry, source, root, machine_names, errors, shared):
     if entry.get("installs_into") and not entry.get("install"):
         errors.append(f"{where}: installs_into says where the install writes, so it needs an install")
         ok = False
+    if kind == "cli" and ("version" in entry) == ("from" in entry):
+        errors.append(f"{where}: give either a version or from, the machine whose version the others install")
+        ok = False
+    if kind == "settings" and ok:
+        suffix = PurePosixPath(entry["file"]).suffix
+        if "own" in entry and suffix not in (".toml", ".json"):
+            errors.append(f"{where}: own names entries in a TOML or JSON file; {entry['file']} isn't one")
+            ok = False
+        if "only" in entry and suffix != ".json":
+            errors.append(f"{where}: only names the keys copied in a JSON file; {entry['file']} isn't one")
+            ok = False
+        for name in entry.get("own", []):
+            if not DOTTED.match(name):
+                errors.append(f"{where}: own names entries by their keys joined with dots, with * for any one key, such as \"projects.*\"; {name!r} isn't one")
+                ok = False
     if not ok:
+        return None
+    if entry.get("from") and entry["from"] not in machine_names:
+        errors.append(f"{where}: from names {entry['from']!r}, which has no machines/{entry['from']}.toml")
         return None
     if "on" in entry:
         if not shared:
