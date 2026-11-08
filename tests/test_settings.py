@@ -3,7 +3,11 @@
 import json
 import os
 import shutil
+import tempfile
 import tomllib
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 from devcluster import config as configs
 from devcluster.items import settings
@@ -143,6 +147,16 @@ class Settings(ClusterTest):
         self.assertEqual(tomllib.loads(real.read_text())["model"], "big")
         self.assertEqual(real.stat().st_mode & 0o777, 0o600)
 
+    def test_a_new_script_can_run(self):
+        self.start()
+        self.source_files()
+        self.write(self.laptop, ".codex/hook.py", "#!/bin/sh\necho hi\n")
+        self.laptop.sync()
+        self.carry()
+        self.server.sync()
+        self.assertEqual(self.server.path(".codex/hook.py").stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.server.path(".codex/config.toml").stat().st_mode & 0o777, 0o600)
+
     def test_dry_run_changes_nothing(self):
         self.start(server_mode="dry-run")
         self.source_files()
@@ -250,6 +264,26 @@ class Merge(ClusterTest):
         self.assertEqual(data["projects"], {"x": {"t": 1}, "y": {"t": 2}})
         self.assertEqual(data["c"], {"d": "[e]"})
 
+    def test_extra_quotes_closing_a_string_and_quotes_in_a_comment(self):
+        local = 'a = """a"""" # " """\nb = """\n[unterminated\n"""\n[projects.local]\ntrust_level = "trusted"\n'
+        merged = settings.merge_toml('[projects.source]\ntrust_level = "trusted"\n', local, ["projects"])
+        self.assertEqual(set(tomllib.loads(merged)["projects"]), {"source", "local"})
+
+    def test_a_file_that_reads_but_cannot_be_split_is_left_alone(self):
+        original = settings.blocks
+
+        def failing(text):
+            if "local" in text:
+                raise settings.Unusable("can't split")
+            return original(text)
+
+        settings.blocks = failing
+        try:
+            with self.assertRaises(settings.Unusable):
+                settings.merge_toml("[projects.source]\nt = 1\n", "[projects.local]\nt = 2\n", ["projects"])
+        finally:
+            settings.blocks = original
+
     def test_a_machines_own_entry_replaces_the_sources_whole(self):
         source = '[projects."x"]\nt = 1\n\n[projects."x".deep]\nu = 1\n\n[other]\nv = 1\n'
         local = '[projects."x"]\nt = 9\n'
@@ -280,3 +314,31 @@ class Validation(ClusterTest):
         self.assertIn("only names the keys", self.check('[devcluster]\nfollow_folder = "~/s"\n[[settings]]\nname = "s"\nfile = "~/a.toml"\nfrom = "laptop"\nonly = ["k"]\n'))
         self.assertIn("which has no machines/desk.toml", self.check('[devcluster]\nfollow_folder = "~/s"\n[[settings]]\nname = "s"\nfile = "~/a.toml"\nfrom = "desk"\n'))
         self.assertIn("needs follow_folder", self.check('[[settings]]\nname = "s"\nfile = "~/a.toml"\nfrom = "laptop"\n'))
+
+
+class ChangedMeanwhile(unittest.TestCase):
+    def test_a_save_made_while_updating_is_not_undone(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            (folder / "shared").mkdir()
+            (folder / "shared" / "claude-servers").write_text('{"mcpServers": {"db": {}}}')
+            target = folder / "claude.json"
+            target.write_text('{"numStartups": 1}')
+            ctx = SimpleNamespace(machine="server", dry_run=False, root=folder / "dc",
+                                  config=SimpleNamespace(setting=lambda key, default=None: str(folder / "shared") if key == "follow_folder" else default))
+            item = configs.Item("settings", "claude-servers", {"file": str(target), "from": "laptop", "only": ["mcpServers"]}, "test")
+            original = settings._wanted
+
+            def meanwhile(*args):
+                target.write_text('{"numStartups": 2}')  # Claude Code saves while devcluster works
+                return original(*args)
+
+            settings._wanted = meanwhile
+            try:
+                outcome = settings.sync_settings(item, ctx)
+            finally:
+                settings._wanted = original
+            self.assertEqual(outcome.state, "busy")
+            self.assertEqual(json.loads(target.read_text()), {"numStartups": 2})
+            self.assertEqual(settings.sync_settings(item, ctx).state, "changed")
+            self.assertEqual(json.loads(target.read_text()), {"numStartups": 2, "mcpServers": {"db": {}}})

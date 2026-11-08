@@ -90,8 +90,12 @@ def _follow(item, ctx, path, label):
         return result(item, OK, f"matches {source}'s copy")
     if ctx.dry_run:
         return result(item, WOULD_CHANGE, f"would replace it with {source}'s copy" if current is not None else f"would write {source}'s copy")
+    # A program that writes this file too, such as Claude Code, may have saved it since it was
+    # read. Writing now would undo that save, so the next run starts again from it.
+    if _read(real) != current:
+        return result(item, BUSY, f"{label} changed while devcluster was updating it; the next run tries again")
     kept = _keep_first(ctx, item, current)
-    mode = real.stat().st_mode & 0o777 if current is not None else 0o600
+    mode = real.stat().st_mode & 0o777 if current is not None else (0o700 if wanted.startswith("#!") else 0o600)
     follow.write(real, wanted, mode)
     if real.read_text() != wanted:
         return result(item, FAILED, f"wrote {source}'s copy, but {label} doesn't match it")
@@ -124,6 +128,13 @@ def _wanted(item, shared, current, source):
     if kind == "json":
         _json(shared, f"{source}'s copy isn't valid JSON")
     return shared
+
+
+def _read(path):
+    try:
+        return path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def _keep_first(ctx, item, current):
@@ -171,9 +182,13 @@ def merge_toml(source_text, local_text, own, source="the source"):
     if local_text:
         try:
             local_data = tomllib.loads(local_text)
-            local_blocks = blocks(local_text)
-        except (tomllib.TOMLDecodeError, Unusable):
-            local_data, local_blocks = {}, []  # it doesn't read, so nothing of it is kept
+        except tomllib.TOMLDecodeError:
+            local_data = {}  # it doesn't read, so nothing of it is kept
+        else:
+            try:
+                local_blocks = blocks(local_text)
+            except Unusable:
+                raise Unusable("this machine's file is laid out in a way devcluster can't split into tables, so it was left alone") from None
 
     def entry(block):
         for prefix in prefixes:
@@ -296,8 +311,12 @@ class _Scan:
                     i += 2
                     continue
                 if self.string in ('"""', "'''") and line.startswith(self.string, i):
+                    # Up to two more quotes right after the closing three belong to the string.
+                    end = i + 3
+                    while end < min(len(line), i + 5) and line[end] == self.string[0]:
+                        end += 1
                     self.string = None
-                    i += 3
+                    i = end
                     continue
                 if self.string == char:
                     self.string = None
