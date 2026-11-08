@@ -12,6 +12,7 @@ Each machine keeps itself in sync. A timer on every machine runs `devcluster syn
 - **Tools and skills:** kept at the branch, tag or commit the list names, and installed when that moves. A check after the install proves it works; a failed one goes back to the last good version, and an installed copy edited by hand is kept and reported, never lost.
 - **Command-line tools:** kept at one version.
 - **An encrypted secrets repo:** pulled and decrypted with its own commands, and, given a publish command, this machine's changes encrypted and pushed.
+- **Logins that can't be copied:** a login whose token changes each time it's used, made on each machine by its own command, usually from a password in the secrets repo.
 - **Files:** for example, the instructions every agent reads.
 
 Each machine pushes a report of its run, so `devcluster status` on any machine shows what every machine did, what failed, and what needs a person. To change something everywhere, push a change to the list.

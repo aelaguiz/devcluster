@@ -3,6 +3,7 @@
 import base64
 import json
 
+from devcluster import config as configs
 from tests.fakes import FAKE_SECRETS, SECRET_VALUE, ClusterTest, git, wrap_git
 
 INSTALL = 'mkdir -p "$HOME/.skills" && cp skill.txt "$HOME/.skills/skill.txt" && echo run >> "$HOME/.install-count"'
@@ -160,6 +161,109 @@ class Clis(ClusterTest):
         self.start("2.0", install='echo "1.0" > "$HOME/.fake-cli"')
         self.laptop.sync()
         self.assertState(self.laptop, "fakecli", "failed", "its check still shows 1.0")
+
+
+LOGIN_CHECK = """#!/bin/sh
+if [ -s "$HOME/.missing" ]; then echo "no login here for: $(tr '\\n' ' ' < "$HOME/.missing")"; exit 1; fi
+echo "every login works"
+"""
+# Logs in the first two missing identities, or refuses when .refuse exists.
+LOGIN = """#!/bin/sh
+echo run >> "$HOME/.login-count"
+if [ -e "$HOME/.refuse" ]; then echo "password=hunter2 refused" >&2; exit 4; fi
+tail -n +3 "$HOME/.missing" > "$HOME/.missing.new"; mv "$HOME/.missing.new" "$HOME/.missing"
+"""
+
+
+class Logins(ClusterTest):
+    def start(self, *missing, machine='mode = "on"'):
+        self.world.config(
+            '[[login]]\nname = "chat"\ncheck = "sh .login-check"\nlogin = "sh .login"\n',
+            {"laptop": machine},
+        )
+        self.laptop = self.world.machine("laptop")
+        self.laptop.path(".login-check").write_text(LOGIN_CHECK)
+        self.laptop.path(".login").write_text(LOGIN)
+        self.laptop.path(".missing").write_text("".join(f"{name}\n" for name in missing))
+        return self.laptop.sync()
+
+    def logins(self):
+        path = self.laptop.path(".login-count")
+        return len(path.read_text().split()) if path.exists() else 0
+
+    def test_a_working_check_is_left_alone(self):
+        self.start()
+        self.assertState(self.laptop, "chat", "ok", "every login works")
+        self.assertEqual(self.logins(), 0)
+
+    def test_a_missing_login_is_made(self):
+        self.start("ada")
+        self.assertState(self.laptop, "chat", "changed", "logged in; every login works")
+        self.laptop.sync()
+        self.assertState(self.laptop, "chat", "ok")
+        self.assertEqual(self.logins(), 1)
+
+    def test_logins_made_a_few_at_a_time_carry_on_each_run(self):
+        self.start("ada", "bo", "cy", "di", "ed")
+        self.assertState(self.laptop, "chat", "changed", "logged in some; no login here for: cy di ed")
+        self.laptop.sync()
+        self.assertState(self.laptop, "chat", "changed", "logged in some; no login here for: ed")
+        self.laptop.sync()
+        self.assertState(self.laptop, "chat", "changed", "logged in; every login works")
+        self.assertEqual(self.logins(), 3)
+
+    def test_a_refused_login_waits_before_trying_again(self):
+        self.start_refusing("ada")
+        item = self.assertState(self.laptop, "chat", "failed", "no login here for: ada; logging in exited 4")
+        self.assertIn("password=***", item["detail"])
+        self.assertNotIn("hunter2", json.dumps(self.laptop.report()))
+        self.laptop.sync()
+        self.assertState(self.laptop, "chat", "failed", "is tried again after")
+        self.assertEqual(self.logins(), 1)
+        self.laptop.sync(now=self.laptop.report()["finished"] + 4000)
+        self.assertState(self.laptop, "chat", "failed", "logging in exited 4")
+        self.assertEqual(self.logins(), 2)
+
+    def start_refusing(self, *missing):
+        self.world.config(
+            '[[login]]\nname = "chat"\ncheck = "sh .login-check"\nlogin = "sh .login"\n',
+            {"laptop": 'mode = "on"'},
+        )
+        self.laptop = self.world.machine("laptop")
+        self.laptop.path(".login-check").write_text(LOGIN_CHECK)
+        self.laptop.path(".login").write_text(LOGIN)
+        self.laptop.path(".refuse").write_text("")
+        self.laptop.path(".missing").write_text("".join(f"{name}\n" for name in missing))
+        return self.laptop.sync()
+
+    def test_a_new_login_to_make_is_tried_at_once(self):
+        self.start_refusing("ada")
+        self.laptop.path(".refuse").unlink()
+        self.laptop.path(".missing").write_text("ada\nbo\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "chat", "changed", "logged in; every login works")
+
+    def test_a_login_that_changes_nothing_fails(self):
+        self.start("ada")
+        self.laptop.path(".login").write_text('#!/bin/sh\necho run >> "$HOME/.login-count"\n')
+        self.laptop.path(".missing").write_text("bo\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "chat", "failed", "no login here for: bo; logging in changed nothing")
+
+    def test_dry_run_only_reports(self):
+        self.start("ada", machine='mode = "dry-run"')
+        self.assertState(self.laptop, "chat", "would-change", "no login here for: ada; would log in")
+        self.assertEqual(self.logins(), 0)
+
+    def test_the_config_needs_both_commands(self):
+        root = self.world.root / "bad-config"
+        (root / "machines").mkdir(parents=True)
+        (root / "cluster.toml").write_text('[[login]]\nname = "chat"\ncheck = "true"\nlogin_timeout = 0\n')
+        (root / "machines" / "laptop.toml").write_text("")
+        with self.assertRaises(configs.ConfigError) as caught:
+            configs.load(root)
+        self.assertIn("cluster.toml: login chat: missing 'login'", caught.exception.errors)
+        self.assertIn("cluster.toml: login chat: login_timeout must be a whole number of seconds", caught.exception.errors)
 
 
 class Secrets(ClusterTest):

@@ -75,7 +75,7 @@ Everything sync keeps in step is an item of some kind. Every kind follows the sa
 3. Check the result.
 4. Report one of the six states, with a sentence.
 
-An item can't block or break another item. The five kinds today are secrets, repos, tools, CLIs and files. A new kind (a Homebrew bundle, an MCP server registration, a launchd service) is one more handler with the same contract.
+An item can't block or break another item. The six kinds today are secrets, repos, tools, CLIs, logins and files. A new kind (a Homebrew bundle, an MCP server registration, a launchd service) is one more handler with the same contract. An engine refuses a config with a kind it doesn't know, and then can't update itself, so every machine moves to the engine that has a new kind before the config uses it.
 
 ### Reports
 
