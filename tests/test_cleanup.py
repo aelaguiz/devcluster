@@ -144,7 +144,7 @@ class Run(CleanupTest):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(dead.exists())
         last = result.stdout.strip().splitlines()[-1]
-        self.assertTrue(last.startswith("dry run: would remove 1 folder, "), last)
+        self.assertTrue(last.startswith("dry run: would remove 1 path, "), last)
         run = self.latest(laptop)
         self.assertIn("This is a dry run. Change nothing.", (run / "brief.md").read_text())
         would = [json.loads(line) for line in (run / "would-remove.jsonl").read_text().splitlines()]

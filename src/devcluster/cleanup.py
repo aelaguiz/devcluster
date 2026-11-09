@@ -355,7 +355,7 @@ def report(volumes, summary, problem, dry_run, would):
         status = "failed"
     if dry_run:
         count, size = would
-        head = f"dry run: would remove {count} folder{'' if count == 1 else 's'}, {human(size)}"
+        head = f"dry run: would remove {count} path{'' if count == 1 else 's'}, {human(size)}"
     else:
         head = _freed(volumes)
     notes = []
