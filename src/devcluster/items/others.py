@@ -109,7 +109,23 @@ def _check_line(ran):
     return _said(ran) or ("its check passes" if ran.ok else f"its check exited {ran.code}")
 
 
+LOGIN_WORDS = {"run": "login", "timeout": "login_timeout", "done": "logged in", "some": "logged in some",
+               "doing": "logging in", "would": "would log in"}
+SETUP_WORDS = {"run": "setup", "timeout": "setup_timeout", "done": "set up", "some": "set up part",
+               "doing": "setting up", "would": "would set up"}
+
+
 def sync_login(item, ctx):
+    return _check_then_run(item, ctx, LOGIN_WORDS)
+
+
+def sync_setup(item, ctx):
+    """Something each machine needs set up once, such as a toolchain or a service: the check
+    says whether it's in place, and the setup command puts it there. Same rules as a login."""
+    return _check_then_run(item, ctx, SETUP_WORDS)
+
+
+def _check_then_run(item, ctx, words):
     home = os.path.expanduser("~")
     timeout = item.get("timeout", CHECK_TIMEOUT)
     memory = ctx.mem(item)
@@ -118,28 +134,28 @@ def sync_login(item, ctx):
     if checked.ok:
         memory.clear()
         return result(item, OK, missing)
-    # Logging in again right after a login that changed nothing would ask the same server the
+    # Running again right after a run that changed nothing would ask the same server the
     # same thing every run. A change in what the check reports, such as a new login to make,
     # is worth trying at once.
     if memory.get("missing") == missing and ctx.now - memory.get("failed_at", 0) < ctx.retry_after:
         retry = clock(memory["failed_at"] + ctx.retry_after)
-        return result(item, FAILED, f"{missing}; logging in failed at {clock(memory['failed_at'])}, and is tried again after {retry}", memory.get("failure", ""))
+        return result(item, FAILED, f"{missing}; {words['doing']} failed at {clock(memory['failed_at'])}, and is tried again after {retry}", memory.get("failure", ""))
     if ctx.dry_run:
-        return result(item, WOULD_CHANGE, f"{missing}; would log in")
-    ran = shell(item.get("login"), cwd=home, timeout=item.get("login_timeout", LOGIN_TIMEOUT))
+        return result(item, WOULD_CHANGE, f"{missing}; {words['would']}")
+    ran = shell(item.get(words["run"]), cwd=home, timeout=item.get(words["timeout"], LOGIN_TIMEOUT))
     failure = "" if ran.ok else tail(ran.err or ran.out)
     again = shell(item.get("check"), cwd=home, timeout=timeout)
     now_missing = _check_line(again)
     if again.ok:
         memory.clear()
-        return result(item, CHANGED, f"logged in; {now_missing}", failure)
+        return result(item, CHANGED, f"{words['done']}; {now_missing}", failure)
     if now_missing != missing:
-        # Some logins were made and others are still to come: the next run carries on.
+        # Some of it was done and the rest is still to come: the next run carries on.
         memory.clear()
-        return result(item, CHANGED, f"logged in some; {now_missing}", failure)
+        return result(item, CHANGED, f"{words['some']}; {now_missing}", failure)
     how = "timed out" if ran.timed_out else f"exited {ran.code}" if not ran.ok else "changed nothing"
     memory.update(missing=now_missing, failed_at=ctx.now, failure=failure)
-    return result(item, FAILED, f"{now_missing}; logging in {how}", failure)
+    return result(item, FAILED, f"{now_missing}; {words['doing']} {how}", failure)
 
 
 # Secrets. The repo's own commands do the decrypting; their output is never recorded,

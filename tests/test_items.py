@@ -176,6 +176,55 @@ tail -n +3 "$HOME/.missing" > "$HOME/.missing.new"; mv "$HOME/.missing.new" "$HO
 """
 
 
+class Setups(ClusterTest):
+    def start(self, *missing, fail=False):
+        self.world.config(
+            '[[setup]]\nname = "toolchain"\ncheck = "sh .setup-check"\nsetup = "sh .setup"\n',
+            {"laptop": 'mode = "on"'},
+        )
+        self.laptop = self.world.machine("laptop")
+        self.laptop.path(".setup-check").write_text(
+            'if [ -s "$HOME/.missing" ]; then echo "not set up here: $(tr \'\\n\' \' \' < "$HOME/.missing")"; exit 1; fi\necho "everything is in place"\n')
+        self.laptop.path(".setup").write_text(
+            ("exit 3\n" if fail else "") + 'echo run >> "$HOME/.setup-count"\nsed 1d "$HOME/.missing" > "$HOME/.missing.next"; mv "$HOME/.missing.next" "$HOME/.missing"\n')
+        self.laptop.path(".missing").write_text("".join(f"{name}\n" for name in missing))
+        return self.laptop.sync()
+
+    def runs(self):
+        path = self.laptop.path(".setup-count")
+        return len(path.read_text().split()) if path.exists() else 0
+
+    def test_something_in_place_is_left_alone(self):
+        self.start()
+        self.assertState(self.laptop, "toolchain", "ok", "everything is in place")
+        self.assertEqual(self.runs(), 0)
+
+    def test_what_is_missing_is_set_up_a_part_at_a_time(self):
+        self.start("sdk", "simulator")
+        self.assertState(self.laptop, "toolchain", "changed", "set up part; not set up here: simulator")
+        self.laptop.sync()
+        self.assertState(self.laptop, "toolchain", "changed", "set up; everything is in place")
+        self.laptop.sync()
+        self.assertState(self.laptop, "toolchain", "ok")
+        self.assertEqual(self.runs(), 2)
+
+    def test_a_failed_setup_waits_before_trying_again(self):
+        self.start("sdk", fail=True)
+        self.assertState(self.laptop, "toolchain", "failed", "not set up here: sdk; setting up exited 3")
+        self.laptop.sync()
+        self.assertState(self.laptop, "toolchain", "failed", "setting up failed at")
+
+    def test_dry_run_only_reports(self):
+        self.world.config(
+            '[[setup]]\nname = "toolchain"\ncheck = "false"\nsetup = "touch $HOME/.ran"\n',
+            {"laptop": 'mode = "dry-run"'},
+        )
+        self.laptop = self.world.machine("laptop")
+        self.laptop.sync()
+        self.assertState(self.laptop, "toolchain", "would-change", "would set up")
+        self.assertFalse(self.laptop.path(".ran").exists())
+
+
 class Logins(ClusterTest):
     def start(self, *missing, machine='mode = "on"'):
         self.world.config(

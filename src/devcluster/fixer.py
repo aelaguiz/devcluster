@@ -24,7 +24,7 @@ from .proc import alive as _alive, boot_time, run as run_command, start as start
 from .results import BLOCKED, BUSY, CHANGED, FAILED, OK, ItemResult
 
 CHECKOUTS = ("repo", "tool", "secrets")
-HANDED = ("repo", "tool", "secrets", "cli", "file", "settings")
+HANDED = ("repo", "tool", "secrets", "cli", "setup", "file", "settings")
 OUTCOMES = ("fixed", "waiting", "needs-owner", "could-not-fix")
 DEFAULTS = {"timeout": 1800, "wait": 1800, "failed_after": 1800, "quiet_after": 1200}
 NOTE_FOR = 24 * 3600     # how long a fixed item's status line says an agent fixed it
@@ -740,6 +740,8 @@ def _how_worked(item):
         return f"a command-line tool devcluster installs at the version {item.get('from')} has"
     if item.kind == "cli":
         return "a command-line tool devcluster installs at a set version"
+    if item.kind == "setup":
+        return f"something this machine needs set up once: `{item.get('check')}` says whether it is in place, and `{item.get('setup')}` puts it there; devcluster runs the setup whenever the check fails"
     if item.kind == "nightly":
         return f"a command devcluster starts in the background once a night; the last run's output is in ~/.devcluster/state/nightly/{item.name}/log, and it runs again only on the next night"
     if item.kind == "settings":
