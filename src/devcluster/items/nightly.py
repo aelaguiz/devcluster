@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from ..context import result
-from ..paths import clock, expand
+from ..paths import clock, expand, now as clock_now
 from ..proc import alive, redact, start, stop, tail
 from ..results import CHANGED, FAILED, OK, WOULD_CHANGE
 
@@ -65,12 +65,13 @@ def sync_nightly(item, ctx):
     if tonight and not (last and last["started"] >= tonight[0]):
         if ctx.dry_run:
             return result(item, WOULD_CHANGE, "would start now")
+        at = clock_now()  # not the run's start: the items before this may have taken a while
         started, problem = _launch(item, ctx, folder)
         if started is None:
-            memory["last"] = {"started": ctx.now, "ended": ctx.now, "code": None, "said": f"couldn't start: {problem}", "log": ""}
+            memory["last"] = {"started": at, "ended": at, "code": None, "said": f"couldn't start: {problem}", "log": ""}
         else:
-            memory["running"] = {**started, "started": ctx.now}
-            return result(item, CHANGED, f"started at {clock(ctx.now)}")
+            memory["running"] = {**started, "started": at}
+            return result(item, CHANGED, f"started at {clock(at)}")
     return _report(item, memory.get("last"), hours, ctx.now)
 
 
