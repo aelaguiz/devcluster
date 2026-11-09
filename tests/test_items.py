@@ -2,6 +2,7 @@
 
 import base64
 import json
+import subprocess
 
 from devcluster import config as configs
 from tests.fakes import FAKE_SECRETS, SECRET_VALUE, ClusterTest, git, wrap_git
@@ -322,6 +323,20 @@ class Secrets(ClusterTest):
         self.assertIn("-edited", self.laptop.path("secrets/local/app.env").read_text())
         self.assertNoLeak()
 
+    def test_a_failed_decrypt_someone_finished_by_hand_is_behind_us(self):
+        self.laptop.path(".fail-decrypt").write_text("")
+        self.world.commit("secrets", {"encrypted/new.env.enc": base64.b64encode(b"NEW=1\n").decode()})
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "failed", "decrypting failed")
+        self.laptop.path(".fail-decrypt").unlink()
+        subprocess.run(["./bin/secrets", "decrypt"], cwd=self.laptop.path("secrets"), env=self.laptop.env(), check=True, capture_output=True)
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "ok", "up to date, and its check passes")
+        self.assertEqual(self.laptop.path("secrets/local/new.env").read_text(), "NEW=1\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "ok")
+        self.assertNoLeak()
+
     def test_unpublished_local_edit_blocks_the_pull(self):
         before = self.laptop.git("secrets", "rev-parse", "HEAD")
         self.laptop.path("secrets/local/app.env").write_text(f"TOKEN={SECRET_VALUE}-edited\n")
@@ -436,6 +451,25 @@ class PublishedSecrets(ClusterTest):
         self.assertEqual(self.laptop.git("secrets", "status", "--porcelain"), "")
         self.assertFalse(self.laptop.path("secrets/local/new.env").exists())
         self.assertEqual(self.laptop.path("secrets/local/app.env").read_text(), self.EDITED)
+
+    def test_a_failed_decrypt_whose_edit_was_published_by_hand_is_behind_us(self):
+        # Home on November 9: the decrypt wouldn't overwrite a file this machine had changed,
+        # then the fixer published that file and pushed. The next run is simply up to date.
+        self.laptop.path(".fail-decrypt").write_text("")
+        self.world.commit("secrets", {"encrypted/new.env.enc": base64.b64encode(b"NEW=1\n").decode()})
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "failed", "decrypting failed")
+        self.laptop.path(".fail-decrypt").unlink()
+        secrets, env = self.laptop.path("secrets"), self.laptop.env()
+        subprocess.run(["./bin/secrets", "decrypt"], cwd=secrets, env=env, check=True, capture_output=True)
+        self.laptop.path("secrets/local/app.env").write_text(self.EDITED)
+        subprocess.run(["./bin/secrets", "publish"], cwd=secrets, env=env, check=True, capture_output=True)
+        self.laptop.git("secrets", "commit", "--quiet", "-am", "Publish what changed on laptop")
+        self.laptop.git("secrets", "push", "--quiet", "origin", "main")
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "ok", "up to date, and its check passes")
+        self.assertTrue(self.origin_has("app.env", self.EDITED))
+        self.assertNoLeak()
 
     def test_a_failed_decrypt_is_retried_before_anything_is_published(self):
         self.laptop.path(".fail-decrypt").write_text("")

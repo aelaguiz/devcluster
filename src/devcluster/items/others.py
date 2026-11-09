@@ -169,9 +169,16 @@ def sync_secrets(item, ctx):
     # the decrypted files changed since it failed, retry instead of blocking for good.
     memory = ctx.mem(item)
     retrying = "decrypt_pending" in memory
-    if retrying:
-        if _plaintext(git) != memory.get("plaintext"):
+    if retrying and _plaintext(git) != memory.get("plaintext"):
+        # Something wrote here since: an edit nobody has published, or someone (often the fixer)
+        # finishing what the decrypt couldn't. Once every plain file matches Git, a decrypt has
+        # nothing left to overwrite, and the failed one is behind us.
+        if not shell(item.get("check"), cwd=path, timeout=timeout).ok:
             return result(item, BLOCKED, "a decrypt failed on an earlier run, and a decrypted file here has changed since, so devcluster won't decrypt over it. Run the check by hand to see which file")
+        if not ctx.dry_run:
+            memory.pop("decrypt_pending", None)
+            memory.pop("plaintext", None)
+        retrying = False
     if item.get("publish"):
         return _both_ways(item, ctx, git, branch, timeout, retrying)
     if not retrying:

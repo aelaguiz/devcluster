@@ -321,7 +321,9 @@ class Fixer:
         message = folder / f"{stamp}-{re.sub(r'[^A-Za-z0-9._-]', '-', label)}.txt"
         message.write_text(body)
         env = dict(os.environ, DEVCLUSTER_SUBJECT=subject, DEVCLUSTER_MESSAGE=str(message), DEVCLUSTER_MACHINE=self.machine)
-        sent = run_command(["/bin/sh", "-c", command], timeout=180, env=env, input=body)
+        # From the home folder: launchd starts the timer in /, and a sender that picks its
+        # mailbox by folder (agent-email) has no rule for /.
+        sent = run_command(["/bin/sh", "-c", command], cwd=str(Path.home()), timeout=180, env=env, input=body)
         with open(folder / "sent.log", "a") as log:
             log.write(f"{stamp} {'sent' if sent.ok else 'failed'} {subject}" + ("" if sent.ok else f": {sent.first_line()}") + "\n")
         return sent.ok
