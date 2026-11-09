@@ -197,7 +197,7 @@ def brief(config, machine, volumes, entries, run_dir, previous, started, timeout
         f"# Disk cleanup on {machine}",
         "",
         f"You are running tonight's disk cleanup on the machine devcluster calls {machine}"
-        + (f": {description}" if description else "") + ".",
+        + (f": {description.rstrip('.')}" if description else "") + ".",
         "",
         f"Read the skill first: {SKILL}. It holds the judgment and the commands.",
         "",
