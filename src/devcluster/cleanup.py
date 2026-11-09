@@ -85,6 +85,8 @@ def _run(layout, config, machine, command, folder, dry_run):
         problem = f"stopped after {_span(timeout)}" + ("" if summary else ", before it wrote its summary")
     elif summary is None:
         problem = f"{problem} (the agent exited {code})"
+    elif code != 0 and summary.get("status") == "ok":
+        summary = {**summary, "status": "warning", "said": f"the agent exited {code} after writing its summary; {summary.get('said', '')}".rstrip("; ")}
     line, status = report(volumes, summary, problem, dry_run, _would(run_dir))
     record.update(ended=clock_now(), code=code, timed_out=timed_out, status=status, said=line, summary=summary)
     _save(run_dir / "result.json", record)
@@ -304,6 +306,9 @@ def _agent(command, run_dir, machine, timeout, dry_run):
         except subprocess.TimeoutExpired:
             _stop_group(proc)
             return proc.returncode, True
+        except KeyboardInterrupt:
+            _stop_group(proc)
+            raise
         finally:
             signal.signal(signal.SIGTERM, previous)
 
@@ -437,13 +442,13 @@ def _prune(runs, days, current):
 # Removing, with guards
 
 
-def remove(paths, sudo=False):
+def remove(paths, sudo=False, dry_run=False):
     """`devcluster cleanup rm`: remove each path that passes every guard, record it, and refuse
     the rest with a reason. Returns 1 if any path was refused or couldn't be removed."""
     layout = Layout()
     machine = os.environ.get("DEVCLUSTER_MACHINE") or layout.machine()
     run_dir = os.environ.get("DEVCLUSTER_CLEANUP_RUN")
-    dry_run = os.environ.get("DEVCLUSTER_CLEANUP_DRY_RUN") == "1"
+    dry_run = dry_run or os.environ.get("DEVCLUSTER_CLEANUP_DRY_RUN") == "1"
     guards, problem = Guards.load(layout, machine, run_dir)
     failed = False
     for path in paths:
@@ -452,7 +457,7 @@ def remove(paths, sudo=False):
             print(f"refused, {reason}: {path}")
             failed = True
             continue
-        target = os.path.realpath(path)
+        target = canonical(path)
         size = _size(target, sudo)
         if dry_run:
             _append(run_dir, "would-remove.jsonl", target, size)
@@ -480,15 +485,15 @@ class Guards:
 
     @classmethod
     def load(cls, layout, machine, run_dir):
-        home = os.path.realpath(os.path.expanduser("~"))
+        home = canonical(os.path.expanduser("~"))
         try:
             config = configs.load(layout.config)
         except configs.ConfigError as error:
             return cls(home, [], [], set()), f"the config has problems, so the keep list can't be read ({error.errors[0]})"
         floors = config.cleanup_machines.get(machine, {}).get("floors") or {}
-        places = [home] + [os.path.realpath(v) for v in floors if v != "/"]
-        places += [os.path.realpath(p) for p in TASK_PLACES if os.path.isdir(p)]
-        kept = kept_paths(config.keep, machine, _today()) if machine else []
+        places = [home] + [canonical(v) for v in floors if v != "/"]
+        places += [canonical(p) for p in TASK_PLACES if os.path.isdir(p)]
+        kept = [canonical(p) for p in kept_paths(config.keep, machine, _today())] if machine else []
         if run_dir:
             try:
                 lines = Path(run_dir, "keep.txt").read_text().splitlines()
@@ -496,15 +501,20 @@ class Guards:
                 lines = []
             except OSError as error:
                 return cls(home, places, kept, set()), f"this run's keep.txt can't be read ({error.strerror})"
-            kept += [os.path.realpath(os.path.expanduser(line.strip())) for line in lines if line.strip().startswith(("/", "~"))]
+            kept += [canonical(os.path.expanduser(line.strip())) for line in lines if line.strip().startswith(("/", "~"))]
         return cls(home, list(dict.fromkeys(places)), list(dict.fromkeys(kept)), mount_points()), None
 
     def refusal(self, path):
         if not os.path.lexists(path):
             return "it doesn't exist"
+        if ".." in path.split("/"):
+            return "it has '..' in it; name the folder by its own full path"
         if os.path.islink(path.rstrip("/") or "/"):
             return "it's a link; remove a link itself with plain rm, never what it points to"
-        target = os.path.realpath(path)
+        through = self._link_on_the_way(path)
+        if through:
+            return f"it goes through the link {through}; name the folder itself, never a path through a link"
+        target = canonical(path)
         if target in self.never:
             return "it's a home folder, a workspace root or a place task folders live, not a task folder"
         if target in self.mounts or os.path.ismount(target):
@@ -521,6 +531,48 @@ class Guards:
             if _inside(target, kept):
                 return f"it's inside something kept ({kept})"
         return None
+
+
+    def _link_on_the_way(self, path):
+        """A link on the way to `path` (`link/.` and `link/child` both go through one), other than
+        one that only stands for a place task folders live or a folder holding one (macOS's /tmp
+        is a link to /private/tmp)."""
+        lexical = os.path.abspath(os.path.expanduser(path))
+        above = "/"
+        for part in lexical.strip("/").split("/"):
+            above = os.path.join(above, part)
+            if os.path.islink(above):
+                real = canonical(above)
+                if not any(real == place or _inside(place, real) for place in self.places):
+                    return above
+        return None
+
+
+def canonical(path):
+    """The path as the disk spells it, links resolved. macOS's disks ignore case, so a path typed
+    with other capitals names the same folder, and every comparison here has to see that."""
+    real = os.path.realpath(path)
+    if sys.platform != "darwin" or not hasattr(fcntl, "F_GETPATH"):
+        return real
+    try:
+        fd = os.open(real, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        parent, name = os.path.split(real)
+        if not name:
+            return real
+        parent = canonical(parent)
+        try:
+            names = os.listdir(parent)
+        except OSError:
+            return os.path.join(parent, name)
+        same = [n for n in names if n == name] or [n for n in names if n.casefold() == name.casefold()]
+        return os.path.join(parent, same[0] if same else name)
+    try:
+        return os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0])
+    except OSError:
+        return real
+    finally:
+        os.close(fd)
 
 
 def _inside(path, folder):
@@ -546,11 +598,19 @@ def mount_points():
     return points
 
 
-def _size(target, sudo):
-    args = (["sudo", "-n"] if sudo else []) + ["du", "-skx", target]
-    shown = run_command(args, timeout=3600)
+def _call(args, timeout):
+    """Run a command in this process's own group, so stopping the cleanup stops it too."""
     try:
-        return int(shown.out.split()[0]) * 1024
+        done = subprocess.run(args, capture_output=True, text=True, errors="replace", timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return None, "", str(error)
+    return done.returncode, done.stdout, done.stderr
+
+
+def _size(target, sudo):
+    code, out, _ = _call((["sudo", "-n"] if sudo else []) + ["du", "-skx", target], 3600)
+    try:
+        return int(out.split()[0]) * 1024
     except (IndexError, ValueError):
         return 0
 
@@ -559,9 +619,9 @@ def _delete(target, sudo):
     args = (["sudo", "-n"] if sudo else []) + ["rm", "-rf"]
     if sys.platform.startswith("linux"):
         args.append("--one-file-system")  # never cross into a drive mounted inside it
-    removed = run_command(args + ["--", target], timeout=6 * 3600)
+    code, _, err = _call(args + ["--", target], 6 * 3600)
     if os.path.lexists(target):
-        return removed.first_line() if not removed.ok else "it is still there"
+        return (err.strip().splitlines() or ["it is still there"])[0] if code != 0 else "it is still there"
     return None
 
 

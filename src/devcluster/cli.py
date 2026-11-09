@@ -111,7 +111,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == "cleanup":
         if args.cleanup_command == "rm":
-            return cleanup.remove(args.paths, args.sudo)
+            return cleanup.remove(args.paths, args.sudo, args.dry_run)
         return cleanup.run(args.dry_run)
     if args.command == "keep":
         return keep.command(args)

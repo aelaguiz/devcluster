@@ -179,6 +179,14 @@ class Run(CleanupTest):
         self.assertEqual(result.returncode, 0)
         self.assertIn("; warning: the VM didn't answer, so its disk wasn't checked", result.stdout)
 
+    def test_an_agent_that_exits_with_an_error_is_a_warning(self):
+        laptop = self.cluster()
+        body = """cat > "$DEVCLUSTER_CLEANUP_RUN/summary.json" <<'EOF'\n{"status": "ok", "said": "cleared the dead checkouts"}\nEOF\nexit 7"""
+        self.agent(laptop, body=body, summary={})
+        result = laptop.run("cleanup")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("warning: the agent exited 7 after writing its summary; cleared the dead checkouts", result.stdout)
+
     def test_a_volume_still_under_its_floor_is_a_warning(self):
         laptop = self.cluster(cleanup='command = \'"$HOME/agent"\'\n[machines.laptop]\nfloors = { "/" = "100%" }\n')
         self.agent(laptop)
@@ -287,6 +295,14 @@ class Remove(CleanupTest):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertFalse(old.exists())
 
+    def test_the_dry_run_flag_before_rm_removes_nothing(self):
+        laptop = self.cluster()
+        plain = self.folder(laptop, "workspace/old-task")
+        result = laptop.run("cleanup", "--dry-run", "rm", str(plain))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("would remove", result.stdout)
+        self.assertTrue(plain.exists())
+
     def test_a_link_is_refused_and_what_it_points_to_stays(self):
         laptop = self.cluster()
         store = self.folder(laptop, "store")
@@ -337,6 +353,18 @@ class Guarding(unittest.TestCase):
         self.guards.places.append(str(self.root))
         self.guards.never.discard(str(self.data))
         self.assertEqual(self.refusal("data"), "it holds a mount")
+
+    def test_a_path_through_a_link_is_refused(self):
+        self.assertIn("link", self.refusal("home/link/.") or "")
+        self.assertTrue(self.refusal("home/link/x").startswith("it goes through the link"), self.refusal("home/link/x"))
+        self.assertTrue(self.refusal("home/workspace/task/../task").startswith("it has '..' in it"))
+
+    def test_other_capitals_name_the_same_folder(self):
+        if not os.path.exists(str(self.root / "home/WORKSPACE")):
+            self.skipTest("this disk tells capitals apart, so other capitals name another folder")
+        self.assertTrue(self.refusal("home/WORKSPACE").startswith("it's a home folder"), self.refusal("home/WORKSPACE"))
+        self.assertTrue(self.refusal("home/workspace/RESULTS").startswith("it's kept"), self.refusal("home/workspace/RESULTS"))
+        self.assertTrue(self.refusal("home/Workspace/Results/round-1").startswith("it's inside something kept"))
 
     def test_home_root_links_and_folders_outside_task_places_are_refused(self):
         self.assertTrue(self.refusal("home").startswith("it's a home folder"))
@@ -461,6 +489,18 @@ class KeepList(CleanupTest):
         self.assertIn("couldn't push the keep list", result.stderr)
         self.assertEqual(self.laptop.git(".devcluster/config", "rev-list", "--count", "HEAD", "--not", "--remotes"), "0")
         self.assertFalse((self.laptop.dc / "config" / "keep.toml").exists())
+
+    def test_a_commit_that_fails_leaves_nothing_staged(self):
+        hook = self.laptop.dc / "config" / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        result = self.add(self.results, day(4))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("couldn't commit the keep list", result.stderr)
+        self.assertEqual(self.laptop.git(".devcluster/config", "status", "--porcelain"), "")
+        hook.unlink()
+        again = self.add(self.results, day(4))
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
 
     def test_uncommitted_changes_to_the_list_here_stop_a_write(self):
         (self.laptop.dc / "config" / "keep.toml").write_text("# someone's edit\n")

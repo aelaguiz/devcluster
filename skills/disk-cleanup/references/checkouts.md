@@ -24,10 +24,13 @@ git -C "$wt" fetch --prune --quiet origin
 idx="$(mktemp -d)/index"
 cp "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || true   # none yet is fine
 export GIT_INDEX_FILE="$idx"                              # every git command below uses the copy
-git -C "$wt" add -A -- . ':(exclude)<nested-repo-path>' || echo "add failed: keep $wt"   # .gitignore keeps ignored files out
-git -C "$wt" diff --cached --stat HEAD 2>/dev/null || git -C "$wt" ls-files | head -100   # look before anything leaves the machine
-tree=$(git -C "$wt" write-tree)
-commit=$(git -C "$wt" commit-tree "$tree" -p HEAD -m "salvage: unsaved work from $wt [skip ci]") || commit=""
+commit=""
+if git -C "$wt" add -A -- . ':(exclude)<nested-repo-path>'; then   # .gitignore keeps ignored files out
+  git -C "$wt" diff --cached --stat HEAD 2>/dev/null || git -C "$wt" ls-files | head -100   # look before anything leaves the machine
+  tree=$(git -C "$wt" write-tree) && commit=$(git -C "$wt" commit-tree "$tree" -p HEAD -m "salvage: unsaved work from $wt [skip ci]") || commit=""
+else
+  echo "add failed, so nothing is saved: keep $wt this run"   # an unreadable file, say; the edits are still only here
+fi
 # no commits yet (HEAD doesn't resolve): leave out -p HEAD to make a root commit
 # clean, with unpushed commits: commit=$(git -C "$wt" commit-tree "$(git -C "$wt" rev-parse 'HEAD^{tree}')" -p HEAD -m "salvage: unpushed commits from $wt [skip ci]")
 [ -n "$commit" ] && git -C "$wt" push --no-verify origin "$commit:refs/heads/$name"      # an empty id would delete the branch instead

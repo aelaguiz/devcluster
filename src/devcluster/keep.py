@@ -285,9 +285,10 @@ def _entries(layout, text):
 
 
 def _restore(git, path, text):
-    if git.run("ls-files", "--error-unmatch", FILE, timeout=60).code == 0:
-        git.run("checkout", "--quiet", "--", FILE, timeout=60)
-    elif text:
+    """Put keep.toml back as it was before this write, in the index as well as on disk, so a
+    failed commit leaves nothing staged to block the next write or the next sync."""
+    git.run("reset", "--quiet", "--", FILE, timeout=60)
+    if text:
         path.write_text(text)
     else:
         path.unlink(missing_ok=True)
