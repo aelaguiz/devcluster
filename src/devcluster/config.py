@@ -1,5 +1,6 @@
 """Read and check the config repo: cluster.toml plus one file per machine."""
 
+import datetime
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -54,6 +55,24 @@ FIXER_MACHINE = {
 }
 
 
+# cleanup.toml: the agent that runs the nightly disk cleanup, how long it may take, and what
+# each machine's run needs to know. Its own file, like fixer.toml, so an engine from before
+# the cleanup ignores it.
+CLEANUP = {
+    "command": str,    # run with the brief on standard input, in the run's folder
+    "timeout": int,    # seconds a run may take
+    "keep_days": int,  # days a run's folder stays
+    "notes": str,      # facts that hold on every machine, a file in the config repo
+}
+CLEANUP_MACHINE = {
+    "notes": str,    # what a run needs to know about this machine, a file in the config repo
+    "floors": dict,  # free space each volume should keep, such as {"/" = "150G", "/data" = "10%"}
+}
+FLOOR = re.compile(r"^(\d+(?:\.\d+)?)\s*([KMGT](?:i?B)?|%)$", re.IGNORECASE)
+# keep.toml: folders a machine's cleanup leaves whole until a date, and who needs them.
+KEEP_FIELDS = ("machine", "path", "who", "why", "until")
+
+
 class ConfigError(Exception):
     def __init__(self, errors):
         super().__init__("\n".join(errors))
@@ -80,6 +99,7 @@ class Machine:
     skip: list = field(default_factory=list)
     items: list = field(default_factory=list)
     engine: str = ""  # a devcluster version for this machine alone, to try one before the rest
+    description: str = ""
 
 
 @dataclass
@@ -90,6 +110,9 @@ class Config:
     machines: dict
     fixer: dict = field(default_factory=dict)          # fixer.toml's settings
     fixer_machines: dict = field(default_factory=dict)  # fixer.toml's [machines.NAME] tables
+    cleanup: dict = field(default_factory=dict)           # cleanup.toml's settings
+    cleanup_machines: dict = field(default_factory=dict)  # cleanup.toml's [machines.NAME] tables
+    keep: list = field(default_factory=list)              # keep.toml's entries
 
     def setting(self, key, default):
         return self.settings.get(key, default)
@@ -140,6 +163,8 @@ def load(root):
         machines[path.stem] = _machine(path.stem, data, root, shared_names, machine_names, errors)
 
     fixer, fixer_machines = _fixer(root / "fixer.toml", machine_names, errors)
+    cleanup, cleanup_machines = _cleanup(root / "cleanup.toml", root, machine_names, errors)
+    keep = read_keep(root / "keep.toml", machine_names, errors)
 
     followers = [item for item in items + [i for m in machines.values() for i in m.items] if item.get("from")]
     if followers and not settings.get("follow_folder"):
@@ -147,7 +172,7 @@ def load(root):
 
     if errors:
         raise ConfigError(errors)
-    return Config(root, settings, items, machines, fixer, fixer_machines)
+    return Config(root, settings, items, machines, fixer, fixer_machines, cleanup, cleanup_machines, keep)
 
 
 def _read(path, errors, required=False):
@@ -217,6 +242,139 @@ def _fixer_settings(data, where, allowed, errors, machine=False):
         elif not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             errors.append(f"{where}: {key} must be a whole number of seconds")
     return dict(data)
+
+
+def _cleanup(path, root, machine_names, errors):
+    data = _read(path, errors) if path.exists() else None
+    if data is None:
+        return {}, {}
+    machines = data.pop("machines", {})
+    settings = _cleanup_settings(data, "cleanup.toml", CLEANUP, root, errors)
+    if not isinstance(machines, dict):
+        errors.append("cleanup.toml: write [machines.NAME] for each machine")
+        return settings, {}
+    chosen = {}
+    for name, entry in machines.items():
+        where = f"cleanup.toml: machines.{name}"
+        if name not in machine_names:
+            errors.append(f"{where}: there is no machines/{name}.toml")
+        elif not isinstance(entry, dict):
+            errors.append(f"{where} must be a table")
+        else:
+            chosen[name] = _cleanup_settings(entry, where, CLEANUP_MACHINE, root, errors)
+    return settings, chosen
+
+
+def _cleanup_settings(data, where, allowed, root, errors):
+    for key, value in data.items():
+        expected = allowed.get(key)
+        if expected is None:
+            errors.append(f"{where}: unknown setting {key!r}")
+        elif key == "notes":
+            _check_notes(value, where, root, errors)
+        elif key == "floors":
+            _check_floors(value, where, errors)
+        elif expected is str:
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"{where}: {key} must be text")
+        elif not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            errors.append(f"{where}: {key} must be a whole number")
+    return dict(data)
+
+
+def _check_notes(value, where, root, errors):
+    if not isinstance(value, str) or not value.strip():
+        errors.append(f"{where}: notes must be a file in the config repo")
+        return
+    notes = PurePosixPath(value)
+    if notes.is_absolute() or ".." in notes.parts:
+        errors.append(f"{where}: notes must be a path inside the config repo")
+    elif not (root / notes).is_file():
+        errors.append(f"{where}: notes {value} isn't in the config repo")
+
+
+def _check_floors(value, where, errors):
+    if not isinstance(value, dict) or not value:
+        errors.append(f'{where}: floors names each volume and the free space it keeps, such as {{"/" = "150G"}}')
+        return
+    for volume, floor in value.items():
+        if not volume.startswith("/"):
+            errors.append(f"{where}: floors names volumes by their full path; {volume!r} isn't one")
+        elif not isinstance(floor, str) or not FLOOR.match(floor.strip()):
+            errors.append(f'{where}: the floor for {volume} is a size such as "150G" or a share such as "10%"; {floor!r} isn\'t one')
+
+
+def floor_bytes(text, total):
+    """The free bytes a floor such as "150G" or "10%" asks for on a volume of `total` bytes."""
+    match = FLOOR.match(str(text).strip())
+    if not match:
+        return None
+    amount, unit = float(match.group(1)), match.group(2).upper()
+    if unit == "%":
+        return int(total * amount / 100)
+    return int(amount * 1024 ** ("KMGT".index(unit[0]) + 1))
+
+
+def read_keep(path, machine_names, errors):
+    """keep.toml's entries, each a dict whose until is a date. Problems go into `errors`."""
+    data = _read(path, errors) if path.exists() else None
+    if data is None:
+        return []
+    for key in sorted(set(data) - {"keep"}):
+        errors.append(f"keep.toml: unknown section {key!r}; write [[keep]] for each folder")
+    entries = data.get("keep", [])
+    if not isinstance(entries, list):
+        errors.append("keep.toml: write [[keep]] for each folder")
+        return []
+    kept = []
+    for number, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict):
+            errors.append(f"keep.toml: entry {number} must be a table")
+            continue
+        entry = _keep_entry(entry, number, machine_names, errors)
+        if entry:
+            kept.append(entry)
+    return kept
+
+
+def _keep_entry(entry, number, machine_names, errors):
+    where = f"keep.toml: {entry['path']}" if isinstance(entry.get("path"), str) else f"keep.toml: entry {number}"
+    ok = True
+    for key in sorted(set(entry) - set(KEEP_FIELDS)):
+        errors.append(f"{where}: unknown field {key!r}")
+        ok = False
+    for key in KEEP_FIELDS:
+        if key not in entry:
+            errors.append(f"{where}: missing {key!r}; each folder names its {', '.join(KEEP_FIELDS)}")
+            ok = False
+        elif key != "until" and (not isinstance(entry[key], str) or not entry[key].strip()):
+            errors.append(f"{where}: {key} must be text")
+            ok = False
+    if not ok:
+        return None
+    if entry["machine"] not in machine_names:
+        errors.append(f"{where}: machine {entry['machine']!r} has no machines/{entry['machine']}.toml")
+        ok = False
+    if not entry["path"].startswith("/"):
+        errors.append(f"{where}: path must be a full path, starting with /")
+        ok = False
+    until = parse_date(entry["until"])
+    if until is None:
+        errors.append(f"{where}: until is the last day it's kept, written YYYY-MM-DD; {entry['until']!r} isn't one")
+        ok = False
+    return {**entry, "until": until} if ok else None
+
+
+def parse_date(value):
+    """A date from "YYYY-MM-DD" text or a TOML date, or None."""
+    if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value.strip()):
+        try:
+            return datetime.date.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 def _items(data, source, root, machine_names, errors, shared):
@@ -352,4 +510,4 @@ def _machine(name, data, root, shared_names, machine_names, errors):
         errors.append(f"{source}: engine must be a tag or commit ID")
         engine = ""
     items = _items(data, source, root, machine_names, errors, shared=False)
-    return Machine(name, mode, str(data.get("os", "")), skip, items, engine)
+    return Machine(name, mode, str(data.get("os", "")), skip, items, engine, str(data.get("description", "")))

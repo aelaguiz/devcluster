@@ -7,6 +7,8 @@ cluster.toml          what every machine gets
 machines/NAME.toml    one file per machine; the file name is the machine's name
 files/                files that [[file]] items put in place
 fixer.toml            optional: the agent that fixes stuck items, and how to reach you
+cleanup.toml          optional: the agent that runs the nightly disk cleanup, and each machine's floors and notes
+keep.toml             optional: folders each machine's cleanup keeps until a date; edit it with devcluster keep
 ```
 
 Check a config before you push it:
@@ -177,7 +179,7 @@ The first run inside the hours starts the command in the background, so a long r
 |---|---|---|
 | `mode` | `"dry-run"` | `"on"` to sync for real. In dry run, devcluster reports what it would change and changes nothing, apart from updating itself and its config checkout. |
 | `os` | none | `"macos"` or `"linux"`, for your own reference |
-| `description` | none | Your own note |
+| `description` | none | What the machine is for. The disk cleanup's brief quotes it. |
 | `engine` | none | A devcluster version for this machine only, so a new version can be tried on one machine first |
 | `skip` | none | Names of items in cluster.toml that don't apply here |
 
@@ -207,3 +209,69 @@ Each `[machines.NAME]` table holds what is particular to one machine:
 | any setting above | | Overrides that setting on this machine. `command = ""` starts no agent there, for a machine where agents never run; its stuck items wait in `devcluster status`. |
 
 One agent runs on a machine at a time, and none runs on a machine in dry run or for an item in dry run. Each run's brief, the agent's output and its result are kept in `~/.devcluster/state/fixer/`, and the messages sent are in `~/.devcluster/state/fixer/messages/`.
+
+## cleanup.toml
+
+The disk cleanup is one run on each machine, done by an agent following [skills/disk-cleanup](../skills/disk-cleanup/SKILL.md). Almost everything that fills these disks is left over from tasks whose agents are gone, so the agent looks for signs of life (something runs from it, something points at it, someone worked in it lately, or it's on the keep list) and clears the rest. [The cleanup plan](plans/cleanup.md) explains it.
+
+`devcluster cleanup` runs it once, in the foreground. To run it each night, add a nightly item, with a `timeout` longer than the cleanup's own so the nightly limit never stops it first:
+
+```toml
+[[nightly]]
+name = "disk-cleanup"
+run = "devcluster cleanup"
+timeout = 6000
+```
+
+Its last line, what it freed or why it failed, is what `devcluster status` shows. Without this file, or without `command`, `devcluster cleanup` fails and says so. It is a file of its own so a machine still on an older engine ignores it.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `command` | none | The agent. It runs through `/bin/sh` with the brief on standard input, in the run's folder. It must run unattended and exit when done. |
+| `timeout` | `5400` | Seconds the agent may run before it and everything it started are stopped |
+| `keep_days` | `14` | Days a run's folder stays |
+| `notes` | none | A file in the config repo with facts that hold on every machine. The brief lists it before the machine's own notes. |
+
+Each `[machines.NAME]` table holds what is particular to one machine:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `notes` | none | A file in the config repo saying what is special about this machine: its drives, what serves from where, the links that mark a live store, where task output piles up. |
+| `floors` | `{"/" = none}` | The volumes to measure and the free space each should keep, as a size (`"150G"`) or a share of the volume (`"10%"`). A run that ends below a floor reports a warning. A volume that isn't mounted is skipped and named. |
+
+Each run gets a folder in `~/.devcluster/state/cleanup/runs/`, and `~/.devcluster/state/cleanup/latest` points at the newest. The engine writes `brief.md`, `keep.txt` (this machine's kept paths, which the agent adds its live work to) and `result.json` (free space it measured itself before and after, and the outcome). The agent writes `summary.json`:
+
+```json
+{"status": "ok", "said": "one sentence", "live": ["..."], "kept": [{"path": "...", "bytes": 0, "why": "..."}], "salvage": ["..."], "problems": ["..."]}
+```
+
+`status` is `ok`, `warning` or `failed`. A missing or unreadable summary, a status that isn't one of those, and a run stopped at its time limit all count as failed. One run goes at a time on a machine.
+
+The agent gets `DEVCLUSTER_CLEANUP_RUN` (the run's folder), `DEVCLUSTER_MACHINE`, and, in a dry run, `DEVCLUSTER_CLEANUP_DRY_RUN=1`. It removes things only through `devcluster cleanup rm`.
+
+### devcluster cleanup rm
+
+`devcluster cleanup rm PATH...` is the one way a run deletes. For each path it refuses, says why, and removes nothing when the path doesn't exist, is a link (remove a link itself with plain `rm`, never what it points to), is `/`, the home folder, `~/workspace`, `~/worktrees`, a mount or a folder holding one, lies outside the places task folders live (the home folder, the machine's floor volumes other than `/`, and the temporary folders), or is kept, holds something kept, or is inside something kept. Kept means this machine's unexpired keep list entries plus the run's `keep.txt`. Otherwise it measures the folder, removes it (on Linux without crossing into another drive), and adds it to the run's `removed.jsonl`. In a dry run it removes nothing and adds it to `would-remove.jsonl`. `--sudo` removes with `sudo -n`, for files the user can't remove. Outside a run it applies the same guards.
+
+## keep.toml
+
+Folders a machine's cleanup leaves whole, with everything under them, until the end of a date. It is for folders someone still needs that show no sign of it, such as a finished run someone is still reading. Facts that don't expire, such as which store a live service reads, belong in the machine's cleanup notes.
+
+```toml
+[[keep]]
+machine = "server"
+path = "/data/experiments/line-b"
+who = "the research agents"
+why = "the only trained output of line B; graders read it this week"
+until = "2026-11-23"
+```
+
+Every field is required, `path` is a full path, and `until` is the last day it's kept. An entry past its date keeps nothing and is dropped by the next write.
+
+Edit it with `devcluster keep` from any machine. Each write checks the list, commits only `keep.toml` and pushes it, so every machine has the change on its next sync. When another machine pushed first, it makes the edit again on top of what that machine pushed. A push that still fails undoes its commit and says so, so the config checkout never holds a commit origin doesn't have.
+
+| Command | What it does |
+|---|---|
+| `devcluster keep add PATH --until YYYY-MM-DD --who WHO --why WHY` | Keeps a folder until a date. On this machine the path is resolved through links and must exist; `--machine NAME` adds one on another machine. Adding a folder that is already there renews it. |
+| `devcluster keep list` | This machine's entries. `--machine NAME` shows another's and `--all` every machine's. Expired entries are marked. |
+| `devcluster keep remove PATH` | Takes a folder off the list |
