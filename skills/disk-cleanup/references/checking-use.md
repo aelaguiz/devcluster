@@ -94,6 +94,7 @@ For each candidate it prints "nothing", or each process using it with how (worki
 Reading the result is the judgment:
 
 - An agent session (`claude`, `codex`, a `node` running either) working in the folder, a server, a trainer, a build or a test runner means someone is using it.
+- A process whose working folder or program has been deleted (lsof shows the path with `(deleted)`, or it no longer exists) is left over from a task that was already cleaned up. Stop it by pid.
 - Some processes are leftovers that look like use: `tail` or `less` on a finished job's log, a `zsh` or `bash` whose parent is gone (a parent pid of 1) with no children and no CPU, or a language server or tool server whose editor or agent has left. Stop the exact process by pid and check the folder again.
 - For "named in its arguments", look at the process by pid (`ps -o pid=,ppid=,etime=,ucomm= -p <pid>`). Use `ucomm` rather than `comm`: on a Mac, `comm` shows a process's title, and some tools put their arguments there.
 - A server can read a file only when a request needs it, so an idle server isn't proof its data is unused. When a live server sits next to a candidate, look in that server's config and launch scripts for the candidate's path. A service can also keep a working folder it opens only on demand, often under `/tmp` and named after it, holding a pid file. If the pid in it is a running process, the folder is that process's: `for f in "$dir"/*.pid; do ps -p "$(cat "$f")" -o pid=,ucomm=; done`.

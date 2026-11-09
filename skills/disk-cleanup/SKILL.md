@@ -36,6 +36,8 @@ The other way round matters as much:
 
 Each of those was alive, and each was one look away.
 
+Keep what is alive, not the folder around it. A live checkout is live, but the untracked recordings and screenshots piling up inside it from last week's QA are task output. A coordinator that runs from a folder needs its program and its settings, not two weeks of build output beside them. A build that uses a cache needs the entries it uses, not every entry ever written. When a folder goes on your keep list because one thing in it runs, look at the rest of it as you would anything else.
+
 Before deleting anything, write down the live projects on the machine in a line, for example: "the owner's main checkout, the game server's worktree, two experiment rounds that are writing, tonight's QA run". If you can't name them, you haven't looked yet. Add their paths to the run's `keep.txt`.
 
 ## When the signs miss something
@@ -94,7 +96,7 @@ Your brief comes from `devcluster cleanup`. It names the machine, its drives and
 
 1. Read the cluster notes and this machine's notes, if the brief names them. They say what serves from where, which drives exist, and anything on this machine that hides its owner.
 2. Measure free space on each volume the brief lists. On a Mac with Time Machine, read [time-machine.md](references/time-machine.md) first, because deletions don't show as free space until the snapshots holding them go.
-3. Make one size pass that also records each folder's newest file. Save it in the run folder for the rest of this run and for the next one.
+3. Make one size pass that also records each folder's newest file. Save it in the run folder for the rest of this run and for the next one. What it finds should add up to the space the volume says is used. When a large part is missing, find it before you go on: system folders the pass skipped, Time Machine snapshots, deleted files a process still holds open, or a VM disk.
 4. Take one process snapshot, and run the other use checks for all the large candidates at once.
 5. Name the live projects, and add their paths to `keep.txt` in the run folder, one per line. The keep list's entries are already there. Everything else that's large is a candidate.
 6. Delete the dead checkouts with nothing unsaved, and the dead output. Salvage the rest in a batch, and delete each one as its push lands. Take a fresh snapshot before each batch, not before each path.
