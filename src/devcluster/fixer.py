@@ -14,15 +14,13 @@ import json
 import os
 import re
 import shutil
-import signal
-import subprocess
 import time
 from pathlib import Path
 
 from . import status
 from .git import Git
 from .paths import clock, engine_root, expand, now as clock_now
-from .proc import run as run_command, tail
+from .proc import alive as _alive, boot_time, run as run_command, start as start_command, stop as _stop, tail
 from .results import BLOCKED, BUSY, CHANGED, FAILED, OK, ItemResult
 
 CHECKOUTS = ("repo", "tool", "secrets")
@@ -561,81 +559,9 @@ def launch(command, run_dir, cwd, key, now):
     # The second command keeps the shell from replacing itself with the agent, so the shell
     # (whose command line names the run folder) lives exactly as long as the agent does.
     script = f'{command} < "$DEVCLUSTER_FIXER_BRIEF" > "$DEVCLUSTER_FIXER_DIR/fixer.log" 2>&1; echo $? > "$DEVCLUSTER_FIXER_DIR/exit"'
-    if env.get("INVOCATION_ID") and shutil.which("systemd-run"):
-        # A systemd service stops everything it started when its run ends, so the fixer gets
-        # a unit of its own.
-        unit = f"devcluster-fixer-{re.sub(r'[^A-Za-z0-9]', '-', key)}-{int(now)}"
-        args = ["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}", f"--working-directory={cwd}", "--property=TimeoutStopSec=15"]
-        for name in ("PATH", "HOME", "USER", "LOGNAME", "LANG", "DEVCLUSTER_HOME", "DEVCLUSTER_FIXER_BRIEF", "DEVCLUSTER_FIXER_RESULT", "DEVCLUSTER_FIXER_DIR"):
-            if env.get(name):
-                args.append(f"--setenv={name}={env[name]}")
-        started = run_command(args + ["/bin/sh", "-c", script], timeout=60, env=env)
-        if not started.ok:
-            return None, started.first_line() or "systemd-run failed"
-        return {"unit": unit}, None
-    try:
-        # Its own session, so launchd doesn't stop it when this run ends.
-        proc = subprocess.Popen(
-            ["/bin/sh", "-c", script, "devcluster-fixer", str(run_dir)],
-            cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except OSError as error:
-        return None, error.strerror
-    return {"pid": proc.pid, "boot": boot_time()}, None
-
-
-def _alive(running):
-    """Whether anything the agent started is still running: its systemd unit, or on macOS any
-    process in its process group, which it can't leave without trying to."""
-    if running.get("unit"):
-        return run_command(["systemctl", "--user", "is-active", "--quiet", running["unit"]], timeout=30).ok
-    group = running.get("pid")
-    if not group or (running.get("boot") and running["boot"] != boot_time()):
-        return False  # after a restart the number may belong to someone else
-    try:
-        os.killpg(group, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return False
-    return True
-
-
-def _stop(running):
-    """Stop the agent and everything it started. True once none of it is left."""
-    if running.get("unit"):
-        run_command(["systemctl", "--user", "stop", running["unit"]], timeout=60)
-        if _alive(running):
-            run_command(["systemctl", "--user", "kill", "--signal=SIGKILL", running["unit"]], timeout=30)
-            time.sleep(1)
-        return not _alive(running)
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(running["pid"], sig)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            return False
-        for _ in range(20):
-            if not _alive(running):
-                return True
-            time.sleep(0.25)
-    return not _alive(running)
-
-
-def boot_time():
-    """When this machine last started, to tell a process from before a restart."""
-    try:
-        with open("/proc/stat") as stat:
-            for line in stat:
-                if line.startswith("btime "):
-                    return int(line.split()[1])
-    except OSError:
-        pass
-    shown = run_command(["sysctl", "-n", "kern.boottime"], timeout=10)
-    match = re.search(r"sec = (\d+)", shown.out)
-    return int(match.group(1)) if match else None
+    unit = f"devcluster-fixer-{re.sub(r'[^A-Za-z0-9]', '-', key)}-{int(now)}"
+    return start_command(script, cwd, env, unit, setenv=("DEVCLUSTER_FIXER_BRIEF", "DEVCLUSTER_FIXER_RESULT", "DEVCLUSTER_FIXER_DIR"),
+                         label=("devcluster-fixer", str(run_dir)))
 
 
 def _stalled(episode):
@@ -687,7 +613,7 @@ def item_brief(fixer, item, episode, saved, run_dir, path):
     fields = dict(item.fields)
     if kind in ("repo", "secrets"):
         fields.setdefault("branch", "main")
-    for field in ("url", "branch", "ref", "version", "check", "install", "source", "targets", "decrypt"):
+    for field in ("url", "branch", "ref", "version", "check", "install", "source", "targets", "decrypt", "run", "hours"):
         if fields.get(field):
             value = ", ".join(fields[field]) if isinstance(fields[field], list) else fields[field]
             lines.append(f"- {field.capitalize()}: {value}")
@@ -812,6 +738,8 @@ def _how_worked(item):
         return f"a command-line tool devcluster installs at the version {item.get('from')} has"
     if item.kind == "cli":
         return "a command-line tool devcluster installs at a set version"
+    if item.kind == "nightly":
+        return f"a command devcluster starts in the background once a night; the last run's output is in ~/.devcluster/state/nightly/{item.name}/log, and it runs again only on the next night"
     if item.kind == "settings":
         return f"a settings file copied from {item.get('from')}, the machine the others follow; devcluster replaces this machine's file with that copy"
     return "a file the config puts in place on this machine"
