@@ -199,14 +199,14 @@ class FakeMachine:
             raise AssertionError(f"install failed on {self.name}:\n{result.stdout}{result.stderr}")
         return result
 
-    def run(self, *args, now=None, **extra):
+    def run(self, *args, now=None, cwd=None, **extra):
         env = self.env(**extra)
         if now is not None:
             env["DEVCLUSTER_NOW"] = str(now)
-        return subprocess.run([str(self.home / "bin" / "devcluster"), *args], env=env, capture_output=True, text=True, cwd=self.home)
+        return subprocess.run([str(self.home / "bin" / "devcluster"), *args], env=env, capture_output=True, text=True, cwd=cwd or self.home)
 
-    def sync(self, *args, now=None, **extra):
-        result = self.run("sync", *args, now=now, **extra)
+    def sync(self, *args, now=None, cwd=None, **extra):
+        result = self.run("sync", *args, now=now, cwd=cwd, **extra)
         if result.returncode not in (0, 1):
             raise AssertionError(f"sync failed on {self.name} (exit {result.returncode}):\n{result.stdout}{result.stderr}")
         return self.report()

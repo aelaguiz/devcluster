@@ -172,6 +172,18 @@ class HandOff(FixerTest):
         self.assertIn("notes2.txt differs in its second half", body)
         self.assertIn("devcluster/saved/laptop/work/", body)
 
+    def test_the_owner_is_told_from_the_home_folder(self):
+        # launchd starts the timer in /, and agent-email picks its mailbox by folder, with no rule for /.
+        laptop = self.laptop
+        self.block(laptop)
+        self.agent(laptop, ":", outcome="could-not-fix", summary="both copies look current")
+        laptop.path("notify").write_text('#!/bin/sh\npwd -P >> "$HOME/notified-from.txt"\n')
+        laptop.sync(now=T0 + 120, cwd="/")
+        laptop.sync(now=T0 + 240, cwd="/")
+        self.wait(laptop)
+        laptop.sync(now=T0 + 360, cwd="/")
+        self.assertEqual(laptop.path("notified-from.txt").read_text().split(), [os.path.realpath(laptop.home)])
+
     def test_needs_owner_sends_the_agents_message(self):
         laptop = self.laptop
         self.block(laptop)
