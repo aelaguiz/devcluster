@@ -20,7 +20,7 @@ Find what's alive, which you can see, and treat the rest as done.
 Something alive leaves marks you can check in a few minutes:
 
 - **Something runs from it.** A process has the folder open, works in it, or names it in its arguments. That covers a training run, a server, a build, a QA stack, or an agent session working there. Agent sessions are processes too: when none of a session's processes are left, its agent is gone.
-- **Something points at it.** A service definition, a scheduled job, a container's mount, or a link from a live checkout.
+- **Something points at it.** A service definition, a scheduled job, a container's mount, a link from a live checkout, or a pid file or socket inside it that names a running process. A setup script that could lay a folder out someday doesn't count: what counts is something that uses it now, or will tonight.
 - **Someone is working in it.** Commits, edits or new output in the last couple of days, on a task that isn't finished. A merged or closed PR finishes the task now, whatever the clock says.
 - **Someone wrote down that it's needed.** Above all an entry on the keep list (`devcluster keep list`), which your brief repeats for this machine. A note with a name and a date that hasn't passed, such as an `OWNER.md` in the folder, counts the same way.
 
@@ -52,7 +52,7 @@ When a run removes something it shouldn't have, ask who needed it and why they c
 
 **Experiments** leave an answer. People come back for what a run found: the readings, the report, the manifest, the few small files that say what happened. They also come back for the winner, if it shipped. The bulk only got the run to its answer: checkpoints and models of finished runs, captures, generated datasets, intermediate rounds, logs. When nothing runs the experiment and nothing has been written for days, keep the small record and remove the bulk. What a run cost (billions of iterations, a week of compute) doesn't keep it. Someone who needs it writing that down does. The newest candidates of a live project, and the baseline its current work compares against, are part of that live project.
 
-**Task output** (QA nights, device captures, renders, downloaded builds, recovery copies, scratch) is done when its task is. Usually one small thing in it is worth keeping, such as a final cut, a report or a configuration file. Keep that and remove the rest.
+**Task output** (QA nights, device captures, renders, downloaded builds, recovery copies, scratch) is done when its task is. Usually one small thing in it is worth keeping, such as a final cut, a report or a configuration file. Keep that and remove the rest, including the kinds of file you didn't expect to find there. A round folder whose intermediates you cleared but whose videos and stills you left alone has been kept, not cleaned.
 
 **Copies that regenerate** (build output, package caches, mirrors a tool copies again on its next run) can go when nothing is building from them. Clearing a cache that a running job refills within the hour gains nothing, and on a Mac with Time Machine it briefly costs double. A cache nothing uses gains its whole size.
 
