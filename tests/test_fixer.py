@@ -386,6 +386,76 @@ class Saving(FixerTest):
         self.assertEqual(git(path, "rev-parse", f"refs/heads/{saved['branch']}"), saved["commit"])
 
 
+    def test_a_public_origin_keeps_the_branch_here_and_says_why(self):
+        path = self.checkout()
+        (path / "plans.md").write_text("private notes nobody meant to publish\n")
+        item = SimpleNamespace(kind="tool", name="work", get=lambda key, default=None: {"path": str(path)}.get(key, default))
+        env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        env.update({k: v for k, v in base_env().items() if k.startswith("GIT_")})
+        from devcluster.git import Git
+        saved = fixers.save(Git(path, env), "laptop", item, T0, push=False, here="its origin is public, so it stays on this machine")
+        self.assertFalse(saved["pushed"])
+        self.assertIn("origin is public", saved["error"])
+        self.assertEqual(git(path, "show", f"{saved['branch']}:plans.md"), "private notes nobody meant to publish")
+        on_origin = git(self.world.root, "--git-dir", str(self.world.github / "work.git"), "for-each-ref", "refs/heads/devcluster/")
+        self.assertEqual(on_origin, "")
+
+
+class PublicOrigins(unittest.TestCase):
+    def test_network_origins_are_asked_over_https_without_credentials(self):
+        cases = {
+            "git@github.com:aelaguiz/aimgr.git": "https://github.com/aelaguiz/aimgr.git",
+            "ssh://git@github.com/aelaguiz/aimgr.git": "https://github.com/aelaguiz/aimgr.git",
+            "ssh://git@example.com:2222/team/tool": "https://example.com/team/tool",
+            "https://x-access-token:secret@github.com/funcountry/psbrain.git": "https://github.com/funcountry/psbrain.git",
+            "https://github.com/aelaguiz/agent-email.git": "https://github.com/aelaguiz/agent-email.git",
+            "/srv/git/work.git": None,
+            "file:///srv/git/work.git": None,
+            "": None,
+        }
+        for url, expected in cases.items():
+            self.assertEqual(fixers.anonymous_url(url), expected, url)
+
+    def answers(self, code, err):
+        calls = []
+
+        def fake(args, **kwargs):
+            calls.append((args, kwargs))
+            return SimpleNamespace(ok=code == 0, code=code, out="", err=err)
+        return fake, calls
+
+    def ask(self, code, err, url="git@github.com:aelaguiz/aimgr.git"):
+        fake, calls = self.answers(code, err)
+        real = fixers.run_command
+        fixers.run_command = fake
+        try:
+            return fixers.public_origin(url), calls
+        finally:
+            fixers.run_command = real
+
+    def test_an_origin_anyone_can_read_is_public(self):
+        public, calls = self.ask(0, "")
+        self.assertTrue(public)
+        args, kwargs = calls[0]
+        self.assertIn("https://github.com/aelaguiz/aimgr.git", args)
+        self.assertIn("credential.helper=", args)
+        self.assertEqual(kwargs["env"]["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+
+    def test_an_origin_that_wants_a_login_is_private(self):
+        public, _ = self.ask(128, "fatal: could not read Username for 'https://github.com': terminal prompts disabled")
+        self.assertFalse(public)
+
+    def test_an_unclear_answer_keeps_the_work_here(self):
+        public, _ = self.ask(128, "fatal: unable to access 'https://github.com/aelaguiz/aimgr.git/': Could not resolve host: github.com")
+        self.assertTrue(public)
+
+    def test_a_local_origin_is_never_asked(self):
+        public, calls = self.ask(0, "", url="/srv/git/work.git")
+        self.assertFalse(public)
+        self.assertEqual(calls, [])
+
+
 class Config(unittest.TestCase):
     def load(self, fixer):
         from devcluster import config

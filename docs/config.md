@@ -172,7 +172,7 @@ A machine file can also hold `[secrets]`, `[[repo]]`, `[[tool]]`, `[[cli]]`, `[[
 
 ## fixer.toml
 
-When an item stays stuck, devcluster saves everything local in it to a branch and starts an agent on that machine to fix it. A machine that stops reporting gets checked over SSH by the next machine in the list. You hear about it only when a fix needs your hands. [The fixer plan](plans/fixer.md) explains how it works, and the agent's instructions are [skills/devcluster-fixer](../skills/devcluster-fixer/SKILL.md).
+When an item stays stuck, devcluster saves everything local in it to a branch and starts an agent on that machine to fix it. The branch is pushed to the item's origin unless anyone can read that origin, as with a public GitHub repo: then it stays on the machine, because uncommitted notes and untracked files were never meant to be published. A secrets repo's branch always stays on the machine. A machine that stops reporting gets checked over SSH by the next machine in the list. You hear about it only when a fix needs your hands. [The fixer plan](plans/fixer.md) explains how it works, and the agent's instructions are [skills/devcluster-fixer](../skills/devcluster-fixer/SKILL.md).
 
 Without this file, or without `command`, nothing here happens and stuck items wait for you. It is a file of its own so a machine still on an older engine ignores it rather than stopping on a setting it doesn't know.
 
