@@ -195,11 +195,13 @@ def _fixer(path, machine_names, errors):
         if not isinstance(entry, dict):
             errors.append(f"{where} must be a table")
             continue
-        chosen[name] = _fixer_settings(entry, where, {**FIXER, **FIXER_MACHINE}, errors)
+        chosen[name] = _fixer_settings(entry, where, {**FIXER, **FIXER_MACHINE}, errors, machine=True)
     return settings, chosen
 
 
-def _fixer_settings(data, where, allowed, errors):
+def _fixer_settings(data, where, allowed, errors, machine=False):
+    # A machine's own table may set command to "": no agent runs on that machine, such as a
+    # laptop that is its owner's alone. Its stuck items wait in the status.
     for key, value in data.items():
         expected = allowed.get(key)
         if expected is None:
@@ -208,7 +210,7 @@ def _fixer_settings(data, where, allowed, errors):
             if not isinstance(value, bool):
                 errors.append(f"{where}: {key} must be true or false")
         elif expected is str:
-            if not isinstance(value, str) or not value.strip():
+            if not isinstance(value, str) or not (value.strip() or (machine and key == "command" and value == "")):
                 errors.append(f"{where}: {key} must be text")
         elif not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             errors.append(f"{where}: {key} must be a whole number of seconds")

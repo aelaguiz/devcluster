@@ -191,6 +191,6 @@ Each `[machines.NAME]` table holds what is particular to one machine:
 |---|---|---|
 | `ssh` | none | How the next machine reaches it, such as `you@server.local` |
 | `watched` | `true` | `false` for a machine that is often off or asleep, such as a laptop, so its silence isn't reported |
-| any setting above | | Overrides that setting on this machine |
+| any setting above | | Overrides that setting on this machine. `command = ""` starts no agent there, for a machine where agents never run; its stuck items wait in `devcluster status`. |
 
 One agent runs on a machine at a time, and none runs on a machine in dry run or for an item in dry run. Each run's brief, the agent's output and its result are kept in `~/.devcluster/state/fixer/`, and the messages sent are in `~/.devcluster/state/fixer/messages/`.
