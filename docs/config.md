@@ -158,6 +158,19 @@ A settings file copied from one machine, such as an agent CLI's config: you chan
 
 On the source machine, each run saves a copy of the file in `follow_folder`, with its home folder written as `{{home}}`. A file that doesn't parse isn't saved, so the others keep the last copy. On every other machine, the file is replaced with the copy, with `{{home}}` turned into that machine's home folder, so a machine with a different user name gets its own paths. A file that is a link, because another program owns the real file, is written through the link. The first time devcluster replaces a machine's file, the file as it was is kept in `~/.devcluster/state/settings/NAME.before`. After that, an edit made on the machine is replaced at the next run. When a program on one machine keeps adding its own entry back, such as a browser registering its MCP server, list that entry in `own` in the machine's file; otherwise the two take turns rewriting the file. If the file changes while devcluster is updating it, nothing is written and the next run tries again.
 
+### [[nightly]]
+
+A command that runs once a night on each machine, such as Git's maintenance on the repos it syncs.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | Its name |
+| `run` | yes | The command. It runs through `/bin/sh` in the home folder. `$DEVCLUSTER_REPOS` lists the checkouts this machine syncs (its repos, tools and secrets repo), one path to a line. |
+| `hours` | no | The local hours it may start in, such as `"1-5"` (the default) or `"23-4"` |
+| `timeout` | no | Seconds it may run before it is stopped, default 3600 |
+
+The first run inside the hours starts the command in the background, so a long run doesn't hold up syncing, and later runs report how it went: running, how long it took and its last line, or what it exited with. It runs once a night. A machine that sleeps through the hours skips that night instead of running the next morning while someone may be using it. A failed run shows in `devcluster status` until the next night's run. Its output is in `~/.devcluster/state/nightly/NAME/log`.
+
 ## machines/NAME.toml
 
 | Key | Default | Meaning |

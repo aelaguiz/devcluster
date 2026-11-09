@@ -10,7 +10,7 @@ NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # The order a run works through the kinds: credentials first, since installs may need them,
 # and logins after the CLIs that keep them. Settings copied from one machine travel in the
 # secrets repo, so they come after it.
-KINDS = ("secrets", "repo", "tool", "cli", "login", "file", "settings")
+KINDS = ("secrets", "repo", "tool", "cli", "login", "file", "settings", "nightly")
 
 _COMMON = {"name", "on", "mode"}
 _INSTALLED = {"install", "check", "installs_into", "install_timeout"}
@@ -22,7 +22,9 @@ FIELDS = {
     "login": ({"name", "check", "login"}, {"timeout", "login_timeout"}),
     "file": ({"name", "source", "targets"}, set()),
     "settings": ({"name", "file", "from"}, {"own", "only"}),
+    "nightly": ({"name", "run"}, {"hours", "timeout"}),
 }
+HOURS = re.compile(r"^(\d{1,2})-(\d{1,2})$")
 DOTTED = re.compile(r"^([A-Za-z0-9_-]+|\*)(\.([A-Za-z0-9_-]+|\*))*$")
 SETTINGS = {
     "engine": str,
@@ -285,6 +287,11 @@ def _item(kind, entry, source, root, machine_names, errors, shared):
     if kind == "cli" and ("version" in entry) == ("from" in entry):
         errors.append(f"{where}: give either a version or from, the machine whose version the others install")
         ok = False
+    if kind == "nightly" and isinstance(entry.get("hours"), str):
+        hours = HOURS.match(entry["hours"])
+        if not hours or int(hours.group(1)) > 23 or int(hours.group(2)) > 23 or hours.group(1) == hours.group(2):
+            errors.append(f"{where}: hours says when it may start, from one hour of the day to another, such as \"1-5\" or \"23-4\"")
+            ok = False
     if kind == "settings" and ok:
         suffix = PurePosixPath(entry["file"]).suffix
         if "own" in entry and suffix not in (".toml", ".json"):
