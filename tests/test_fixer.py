@@ -488,6 +488,13 @@ class Config(unittest.TestCase):
         loaded, _ = self.load('notify = "mail me"\n')
         self.assertIsNone(fixers.settings(loaded, "laptop"))
 
+    def test_a_machines_empty_command_means_no_agent_there(self):
+        loaded, errors = self.load('command = "agent"\n[machines.laptop]\ncommand = ""\n')
+        self.assertEqual(errors, [])
+        self.assertIsNone(fixers.settings(loaded, "laptop"))
+        _, errors = self.load('command = ""\n')
+        self.assertEqual(errors, ["fixer.toml: command must be text"])
+
 
 class Rules(unittest.TestCase):
     """When the fixer tries again, and when it tells the owner, without running anything."""
