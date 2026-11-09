@@ -246,7 +246,14 @@ class Fixer:
                 "GIT_AUTHOR_NAME": "devcluster", "GIT_AUTHOR_EMAIL": "devcluster@localhost",
                 "GIT_COMMITTER_NAME": "devcluster", "GIT_COMMITTER_EMAIL": "devcluster@localhost",
             }
-            saved = save(Git(path, who), self.machine, item, self.now, in_way, push=item.kind != "secrets")
+            if item.kind == "secrets":
+                here = "it holds credentials, so it stays on this machine"
+            elif public_origin(item.get("url")):
+                here = "its origin is public, so it stays on this machine"
+            else:
+                here = None
+            saved = save(Git(path, who), self.machine, item, self.now, in_way, push=here is None, here=here)
+            saved["public"] = here is not None and item.kind != "secrets"
             if item.kind == "secrets":
                 # Decrypted credentials are files Git ignores, so the saved commit doesn't hold
                 # them, and they must never reach a branch. A private copy keeps them instead.
@@ -414,7 +421,7 @@ def _ssh():
 # Saving a checkout
 
 
-def save(git, machine, item, now, in_way=(), push=True):
+def save(git, machine, item, now, in_way=(), push=True, here=None):
     """One commit holding everything local in the checkout, on a devcluster/saved/ branch.
     It is built from a copy of the index, so the working tree, the real index and the branch
     are untouched; the copy keeps a sparse checkout's skip flags, so files outside the sparse
@@ -475,8 +482,49 @@ def save(git, machine, item, now, in_way=(), push=True):
         if not pushed.ok:
             saved["error"] = pushed.first_line() or "the push failed"
     else:
-        saved["error"] = "it holds credentials, so it stays on this machine"
+        saved["error"] = here or "it stays on this machine"
     return saved
+
+
+def public_origin(url, timeout=30):
+    """Whether anyone can read the origin without signing in, as with a public GitHub repo. A
+    saved branch pushed there would publish this machine's uncommitted work: notes, plans and
+    untracked files nobody meant to share. So the branch stays here instead.
+
+    Asked anonymously over HTTPS, with no credentials and none of this user's Git settings, so a
+    rewrite to SSH can't answer with this machine's key. A local origin is nobody else's, so it
+    isn't public. When the answer is unclear (offline, a host that won't say), it counts as
+    public: a branch kept here is still kept, and one pushed to a public repo can't be taken back."""
+    https = anonymous_url(url)
+    if not https:
+        return False
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_ASKPASS", "SSH_ASKPASS")}
+    env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+    probe = run_command(["git", "-c", "credential.helper=", "-c", "core.askPass=", "ls-remote", "--heads", https],
+                        timeout=timeout, env=env)
+    if probe.ok:
+        return True
+    text = (probe.err + probe.out).lower()
+    return not any(sign in text for sign in (
+        "could not read username", "authentication failed", "repository not found",
+        "terminal prompts disabled", "401", "403",
+    ))
+
+
+def anonymous_url(url):
+    """The HTTPS address of a network origin, without any user name or token in it. None for a
+    local path or file:// origin."""
+    url = (url or "").strip()
+    scp = re.match(r"^[^@/:]+@([^:/]+):(?!/)(.+)$", url)
+    if scp:
+        return f"https://{scp.group(1)}/{scp.group(2)}"
+    ssh = re.match(r"^ssh://(?:[^@/]+@)?([^:/]+)(?::\d+)?/(.+)$", url)
+    if ssh:
+        return f"https://{ssh.group(1)}/{ssh.group(2)}"
+    web = re.match(r"^(https?)://(?:[^@/]+@)?(.+)$", url)
+    if web:
+        return f"{web.group(1)}://{web.group(2)}"
+    return None
 
 
 def copy_ignored(git, folder):
@@ -653,6 +701,8 @@ def item_brief(fixer, item, episode, saved, run_dir, path):
     if saved and saved.get("branch"):
         where = "and it reached origin" if saved.get("pushed") else f"on this machine only ({saved.get('error', 'the push failed')})"
         lines.append(f"- Saved everything local in this checkout to branch {saved['branch']} (commit {saved['commit'][:10]}), {where}.")
+        if saved.get("public"):
+            lines.append("- Anyone can read this repo's origin. Whatever you commit and push there is published, so local notes, plans and other private files stay on this machine.")
     elif saved:
         lines.append(f"- Tried to save this checkout to a branch and couldn't: {saved.get('error')}. Nothing here is saved, so don't remove anything you can't put back.")
     else:
