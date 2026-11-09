@@ -77,7 +77,7 @@ Before you add anything to this list, ask who would come back for it and what th
 
 These hold in every case:
 
-- **Delete through `devcluster cleanup rm`.** It refuses a link, a home folder, a workspace root, a mount, anything outside the places task folders live, and anything that is on the keep list, holds something on it or sits inside it. Never get around a refusal with plain `rm`. A refusal means you aimed at the wrong path, or that someone kept it. Git's own `worktree remove` and a tool's own cleaner (`xcrun simctl delete`, `colima delete`, `docker image prune`, `tmutil deletelocalsnapshots`) are fine for what they own. Check those targets against the keep list yourself.
+- **Delete through `devcluster cleanup rm`.** It refuses a link, a home folder, a workspace root, a mount, anything outside the places task folders live, and anything that is on the keep list, holds something on it or sits inside it. Never get around a refusal with plain `rm`. A refusal means you aimed at the wrong path, or that someone kept it. For files your user can't remove, add `--sudo`; the guards still apply. Git's own `worktree remove` and a tool's own cleaner (`xcrun simctl delete`, `colima delete`, `docker image prune`, `tmutil deletelocalsnapshots`) are fine for what they own. Check those targets against the keep list yourself.
 - **Delete only what you looked at.** Use its full resolved path. A session that ran `rm -rf` on a machine's whole home folder emptied about 72 workspaces, and took their logins and CI runners with it.
 - **A backup that didn't land isn't a backup.** Delete a checkout with unsaved work only after you have seen its salvage commit on the remote, or in a local salvage ref. If a push fails, a commit id comes back empty, or a check errors, that checkout stays this run and you say why.
 - **A failed check has told you nothing.** If the process snapshot came back empty, a permission was denied or a check timed out, run it again, or leave the paths it covered for this run. A folder you don't understand is different. That isn't a failed check, it's a reason to look inside.
@@ -90,7 +90,7 @@ Whether a wrong deletion can be undone depends on the machine. A Mac whose Time 
 
 ## The run
 
-Your brief comes from `devcluster cleanup`. It names the machine, its drives and floors, this machine's keep entries, the machine notes to read, the last run's folder, this run's folder (`$DEVCLUSTER_CLEANUP_RUN`) and your deadline. In a dry run, change nothing: `devcluster cleanup rm` records what it would remove, and you record everything else you would do.
+Your brief comes from `devcluster cleanup`. It names the machine, its drives and floors, this machine's keep entries, the machine notes to read, the last run's folder, this run's folder (`$DEVCLUSTER_CLEANUP_RUN`) and your deadline. In a dry run, change nothing: `devcluster cleanup rm` records what it would remove, `devcluster keep add` records what it would keep, and you record everything else you would do in the summary.
 
 1. Read the cluster notes and this machine's notes, if the brief names them. They say what serves from where, which drives exist, and anything on this machine that hides its owner.
 2. Measure free space on each volume the brief lists. On a Mac with Time Machine, read [time-machine.md](references/time-machine.md) first, because deletions don't show as free space until the snapshots holding them go.

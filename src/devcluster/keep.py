@@ -158,7 +158,17 @@ def write(layout, change, message, done):
     commit only keep.toml and push. When another machine pushed first, the edit is made again on
     top of origin's newest commit, so nothing anyone else pushed is lost and no merge can
     conflict. A push that still fails undoes this machine's commit, so the config checkout never
-    holds a commit origin doesn't have (that would stop its next sync)."""
+    holds a commit origin doesn't have (that would stop its next sync).
+
+    Inside a cleanup dry run nothing is written: the change is recorded in the run folder's
+    would-keep.jsonl, so the dry run's record shows what the run would have kept."""
+    if os.environ.get("DEVCLUSTER_CLEANUP_DRY_RUN") == "1":
+        run_dir = os.environ.get("DEVCLUSTER_CLEANUP_RUN")
+        if run_dir:
+            with open(os.path.join(run_dir, "would-keep.jsonl"), "a") as out:
+                out.write(json.dumps({"change": message, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}) + "\n")
+        print(f"dry run, nothing written: would have {done}")
+        return 0
     git = Git(layout.config)
     if not git.is_checkout():
         return _fail(f"there's no config checkout at {layout.config}; run devcluster install")

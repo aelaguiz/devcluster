@@ -402,6 +402,14 @@ class KeepList(CleanupTest):
         self.assertEqual(entries[0]["until"].isoformat(), day(10))
         self.assertEqual(entries[0]["why"], "the reruns need it too")
 
+    def test_a_dry_run_writes_nothing_and_records_the_keep(self):
+        run_dir = self.folder(self.laptop, "dry-run")
+        result = self.add(self.results, day(7), DEVCLUSTER_CLEANUP_DRY_RUN="1", DEVCLUSTER_CLEANUP_RUN=str(run_dir))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("dry run, nothing written", result.stdout)
+        self.assertEqual(self.origin_keep(), [])
+        self.assertIn(os.path.realpath(self.results), (run_dir / "would-keep.jsonl").read_text())
+
     def test_remove(self):
         self.add(self.results, day(3))
         result = self.laptop.run("keep", "remove", str(self.results))
