@@ -118,6 +118,20 @@ A command-line tool at one version: a version written here, or whatever version 
 
 The version must appear in the check's output as a whole word: `0.163.0` doesn't match `0.163.0-alpha.5`. When machines installed the tool in different ways, give each one's `install` and `check` in its machine file.
 
+### [[setup]]
+
+Something each machine needs set up once that no repo's install covers: a toolchain, a service, a folder of files another machine has. A new machine gets it on its first sync, and a machine that loses it gets it back.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | Its name |
+| `check` | yes | A command that exits 0 when everything the item sets up is in place on this machine. Its last line says what's missing. |
+| `setup` | yes | A command that sets up what's missing. Running it again when part is in place must be safe. |
+| `timeout` | no | Seconds for the check, default 60 |
+| `setup_timeout` | no | Seconds for the setup, default 1800 |
+
+It follows the same rules as a `[[login]]`: the check runs every run, the setup when the check fails, a setup can do part of the work each run, and one that leaves the check's line as it was is tried again after `retry_failed_after`. A stuck setup is handed to the fixer like a stuck install.
+
 ### [[login]]
 
 Logins a tool keeps for itself, made on each machine. Use this for a login that can't be copied between machines: an OAuth login whose refresh token changes every time it's used signs both copies out the first time both renew it. Each machine makes its own instead, usually from a password the secrets repo carries.

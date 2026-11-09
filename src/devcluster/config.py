@@ -8,10 +8,10 @@ from pathlib import Path, PurePosixPath
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-# The order a run works through the kinds: credentials first, since installs may need them,
-# and logins after the CLIs that keep them. Settings copied from one machine travel in the
+# The order a run works through the kinds: credentials first, since installs may need them;
+# setups after the repos, tools and CLIs they build on; logins after the setups they need. Settings copied from one machine travel in the
 # secrets repo, so they come after it.
-KINDS = ("secrets", "repo", "tool", "cli", "login", "file", "settings", "nightly")
+KINDS = ("secrets", "repo", "tool", "cli", "setup", "login", "file", "settings", "nightly")
 
 _COMMON = {"name", "on", "mode"}
 _INSTALLED = {"install", "check", "installs_into", "install_timeout"}
@@ -20,6 +20,7 @@ FIELDS = {
     "repo": ({"path", "url"}, {"branch", "timeout"} | _INSTALLED),
     "tool": ({"path", "url"}, {"ref", "timeout"} | _INSTALLED),
     "cli": ({"name", "check", "install"}, {"version", "from", "timeout", "install_timeout"}),
+    "setup": ({"name", "check", "setup"}, {"timeout", "setup_timeout"}),
     "login": ({"name", "check", "login"}, {"timeout", "login_timeout"}),
     "file": ({"name", "source", "targets"}, set()),
     "settings": ({"name", "file", "from"}, {"own", "only"}),
@@ -422,7 +423,7 @@ def _item(kind, entry, source, root, machine_names, errors, shared):
         errors.append(f"{where}: missing {key!r}")
         ok = False
     for key, value in entry.items():
-        if key in ("timeout", "install_timeout", "login_timeout"):
+        if key in ("timeout", "install_timeout", "login_timeout", "setup_timeout"):
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 errors.append(f"{where}: {key} must be a whole number of seconds")
                 ok = False
