@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, config as configs, install, status, sync
+from . import __version__, cleanup, config as configs, install, keep, status, sync
 from .paths import Layout
 
 
@@ -86,7 +86,35 @@ def main(argv=None):
     remove = commands.add_parser("uninstall", help="stop the timer and remove the command")
     remove.add_argument("--bin-dir", help="where the devcluster command was put")
 
+    clean = commands.add_parser("cleanup", help="run this machine's disk cleanup now, with the agent cleanup.toml names")
+    clean.add_argument("--dry-run", action="store_true", help="decide everything and remove nothing; record what would go")
+    clean_commands = clean.add_subparsers(dest="cleanup_command")
+    rm = clean_commands.add_parser("rm", help="remove folders, refusing anything kept, a mount, a home folder or a link")
+    rm.add_argument("paths", nargs="+", metavar="PATH")
+    rm.add_argument("--sudo", action="store_true", help="remove with sudo -n, for files this user can't remove")
+
+    kept = commands.add_parser("keep", help="the folders each machine's cleanup keeps until a date")
+    keep_commands = kept.add_subparsers(dest="keep_command", required=True)
+    add = keep_commands.add_parser("add", help="keep a folder until a date, or renew it")
+    add.add_argument("path", metavar="PATH")
+    add.add_argument("--until", required=True, metavar="YYYY-MM-DD", help="the last day it's needed")
+    add.add_argument("--who", required=True, help="who relies on it")
+    add.add_argument("--why", required=True, help="what they need it for")
+    add.add_argument("--machine", help="the machine it's on (default: this one)")
+    listing = keep_commands.add_parser("list", help="show the keep list")
+    listing.add_argument("--machine", help="one machine's folders (default: this one)")
+    listing.add_argument("--all", action="store_true", help="every machine's folders")
+    drop = keep_commands.add_parser("remove", help="take a folder off the keep list")
+    drop.add_argument("path", metavar="PATH")
+    drop.add_argument("--machine", help="the machine it's on (default: this one)")
+
     args = parser.parse_args(argv)
+    if args.command == "cleanup":
+        if args.cleanup_command == "rm":
+            return cleanup.remove(args.paths, args.sudo)
+        return cleanup.run(args.dry_run)
+    if args.command == "keep":
+        return keep.command(args)
     if args.command == "sync":
         return sync.run(args.dry_run, args.only, not args.no_publish, args.quiet, argv)
     if args.command == "status":

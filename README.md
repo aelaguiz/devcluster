@@ -21,7 +21,7 @@ When an item stays stuck, devcluster can hand it to an agent. It first saves eve
 
 ## What's coming
 
-Putting heavy work on the machine with room for it, device claims that hold, cleanup that keeps disks from filling, and one consistent set of agent rules. [The architecture](docs/architecture.md) sets out the direction, and the [issues](https://github.com/aelaguiz/devcluster/issues) track the work.
+Putting heavy work on the machine with room for it, device claims that hold, and one consistent set of agent rules. The nightly disk cleanup ([#28](https://github.com/aelaguiz/devcluster/issues/28)) is being built. [The architecture](docs/architecture.md) sets out the direction, and the [issues](https://github.com/aelaguiz/devcluster/issues) track the work.
 
 ## Set up a machine
 
@@ -44,6 +44,8 @@ That puts `devcluster` in `~/.local/bin` and starts the timer: launchd on macOS,
 | `devcluster sync` | One run. `--dry-run` reports without changing anything. `--only NAME` runs one item. |
 | `devcluster status` | Every machine's last run. `--all` lists every item, and `--json` prints the raw reports. |
 | `devcluster check-config [DIR]` | Checks a config checkout and shows what each machine gets |
+| `devcluster cleanup` | This machine's disk cleanup, now. `--dry-run` decides everything and removes nothing. `cleanup rm PATH` is the guarded removal a run deletes through. See [cleanup.toml](docs/config.md#cleanuptoml). |
+| `devcluster keep add PATH --until DATE --who WHO --why WHY` | Keeps a folder from the cleanup until a date, on every machine's list. `keep list` and `keep remove` too. |
 | `devcluster install` | Sets the machine up |
 | `devcluster uninstall` | Stops the timer and removes the command |
 
@@ -52,6 +54,7 @@ That puts `devcluster` in `~/.local/bin` and starts the timer: launchd on macOS,
 - [The architecture](docs/architecture.md): where the whole project is going
 - [The sync engine plan](docs/plans/sync-engine.md): how sync works and how it's tested
 - [The fixer plan](docs/plans/fixer.md): the agent that fixes stuck items
+- [The cleanup plan](docs/plans/cleanup.md): one nightly disk cleanup, one skill and one keep list
 
 ## Tests
 

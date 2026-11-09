@@ -129,16 +129,15 @@ A phone is plugged into one machine, so that machine is the authority for its cl
 
 ### Cleanup that frees space (#9)
 
-One policy for every machine, in the config. Today's cleanups treat almost everything as precious, so disks still fill. The policy starts the other way round: it names the few things that would be a real loss, and anything else is fair game once its task is over. The protected things are:
+One cleanup for every machine, started by devcluster each night, following one skill and one keep list ([#28](https://github.com/aelaguiz/devcluster/issues/28), [the cleanup plan](plans/cleanup.md)).
 
-- Commits and branches that exist only on that machine.
-- Uncommitted changes.
-- Files a running process has open.
-- The repos in the list.
-- Credentials.
-- Anything the machine file names.
+Almost everything on these disks is left over from tasks whose agents are gone. They aren't coming back for their folders, and nothing will ever prove a folder is dead, so a cleanup that waits for proof keeps everything. The cleanup looks for life instead, which can be seen: something runs from the folder, something points at it, someone worked in it in the last couple of days on an unfinished task, or someone wrote down that it's needed. Everything else is finished. A dead checkout's unsaved work goes to a salvage branch first, and a finished experiment keeps its readings and loses its bulk.
 
-Everything else is ranked by how cheap it is to recreate. Build caches, simulators, old task checkouts whose work is pushed, and package caches go first. `devcluster clean` runs from the same timer when free space drops under the machine's target. It reports what it freed. A large folder no rule covers is reported, not deleted, so the policy improves instead of guessing.
+Some things are needed and show no sign of it, such as results someone is reading. Whoever needs one puts it on the keep list, `keep.toml` in the config, with who, why and until when, from any machine with `devcluster keep add`. A wrong deletion is answered by making that easier, never by a new test the cleanup has to pass before it deletes.
+
+- **One skill**, [skills/disk-cleanup](../skills/disk-cleanup/SKILL.md), carries the judgment and names no machine. What is special about a machine (its drives, what serves from where) goes in its notes in the config.
+- **One run**, `devcluster cleanup`, from a nightly item. It writes the agent's brief, measures free space itself before and after, checks the agent's summary, and reports in `devcluster status`.
+- **One way to delete**, `devcluster cleanup rm`, which refuses in code what is a fact rather than a judgment: kept folders and what holds them, mounts, home folders, links, and anything outside the places task folders live.
 
 ### One set of rules, built as intuitions (#10)
 
