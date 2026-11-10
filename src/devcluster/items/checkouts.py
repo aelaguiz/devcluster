@@ -22,7 +22,7 @@ from .. import installs
 from ..context import result
 from ..git import Git, clone, git_version, same_remote, short, version_text
 from ..paths import clock, expand
-from ..proc import run, tail
+from ..proc import redact, run, shell, tail
 from ..results import BLOCKED, BUSY, CHANGED, FAILED, OK, WOULD_CHANGE, plural
 
 FETCH_TIMEOUT = 600
@@ -57,10 +57,76 @@ def sync_repo(item, ctx):
         return result(item, BLOCKED, f"is checked out on {current or 'a detached commit'}, not {branch}; devcluster syncs {branch} only while it's checked out")
 
     done = []
-    stopped = exchange(item, ctx, git, branch, timeout, done)
+    if item.get("sync"):
+        stopped = sync_command(item, ctx, git, branch, timeout, done)
+    else:
+        stopped = exchange(item, ctx, git, branch, timeout, done)
     if stopped:
         return stopped
     return _after_update(item, ctx, git, done)
+
+
+def sync_command(item, ctx, git, branch, timeout, done):
+    """A repo that brings origin in and pushes with its own command, in place of exchange():
+    a checkout many live sessions commit to, where the repo's own script knows how to merge
+    around their uncommitted edits and their commits landing mid-merge. devcluster works out
+    what the command did by comparing the branch and origin before and after it, and adds that
+    to done. Returns a result when the run stops here, otherwise None."""
+    def fetch():
+        return git.run("fetch", "--quiet", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}", timeout=timeout)
+
+    fetched = fetch()
+    if not fetched.ok:
+        return result(item, FAILED, f"couldn't fetch from origin: {fetched.first_line()}", tail(fetched.err))
+    local = git.rev("HEAD")
+    remote = git.rev(f"refs/remotes/origin/{branch}")
+    if local is None:
+        return result(item, BLOCKED, f"has no commits on {branch} yet")
+    if local == remote:
+        return None
+    behind = git.count(f"{local}..{remote}") if remote else 0
+    ahead = git.count(f"{remote}..{local}") if remote else git.count(local)
+    if ctx.dry_run:
+        plan = [f"pull {plural(behind, 'commit')}"] if behind else []
+        plan += [f"push {plural(ahead, 'commit')}"] if ahead else []
+        return result(item, WOULD_CHANGE, f"would run its sync command to {' and '.join(plan)}" + _and_install(item, ctx))
+
+    ran = shell(item.get("sync"), cwd=git.path, timeout=timeout, env=git.env)
+    if not ran.ok:
+        how = "timed out" if ran.timed_out else f"failed (exit {ran.code})"
+        return result(item, FAILED, f"its sync command {how}: {_last_line(ran)}", tail(ran.err + ran.out))
+
+    # Fetch again so the comparison is fresh. Origin moving again straight after is normal in
+    # these repos; what matters is that origin's commits from before came in and this
+    # machine's went out.
+    fetched = fetch()
+    if not fetched.ok:
+        return result(item, FAILED, f"ran its sync command, then couldn't fetch from origin: {fetched.first_line()}", tail(fetched.err))
+    now_local = git.rev("HEAD")
+    now_remote = git.rev(f"refs/remotes/origin/{branch}")
+    came = bool(behind) and git.is_ancestor(remote, now_local)
+    went = bool(ahead) and now_remote is not None and git.is_ancestor(local, now_remote)
+    if came:
+        done.append(f"merged {plural(behind, 'commit')} from origin" if ahead else f"pulled {plural(behind, 'commit')}")
+    if went:
+        done.append(f"pushed {plural(ahead, 'commit')}")
+    missing = []
+    if behind and not came:
+        missing.append(f"origin's {plural(behind, 'commit')} didn't come in")
+    if ahead and not went:
+        missing.append(f"this machine's {plural(ahead, 'commit')} didn't reach origin")
+    if missing:
+        return result(item, FAILED, _prefix(done, f"its sync command succeeded, but {' and '.join(missing)}"), tail(ran.err + ran.out))
+    return None
+
+
+def _last_line(ran):
+    """What a failed command said last: its last line of errors, or of output when it wrote none."""
+    for text in (ran.err, ran.out):
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            return redact(lines[-1])
+    return f"exit {ran.code}"
 
 
 def exchange(item, ctx, git, branch, timeout, done):

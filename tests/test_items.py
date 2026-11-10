@@ -372,6 +372,33 @@ class Secrets(ClusterTest):
         self.assertIn("-edited", self.laptop.path("secrets/local/app.env").read_text())
         self.assertNoLeak()
 
+    def test_a_file_this_machine_keeps_for_itself_doesnt_stop_the_retry(self):
+        # Something on this machine keeps writing its own ledger in the checkout; no decrypt writes it.
+        self.world.commit("config", {"cluster.toml": (
+            '[secrets]\npath = "~/secrets"\nurl = "' + str(self.world.github / "secrets.git") + '"\n'
+            'check = "./bin/secrets check"\ndecrypt = "./bin/secrets decrypt"\nown = ["local/ledger-{machine}.json"]\n'
+        )})
+        self.laptop.path(".fail-decrypt").write_text("")
+        self.world.commit("secrets", {"encrypted/new.env.enc": base64.b64encode(b"NEW=1\n").decode()})
+        self.laptop.path("secrets/local/ledger-laptop.json").write_text("{}\n")
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "failed", "decrypting failed")
+        self.laptop.path("secrets/local/ledger-laptop.json").write_text('{"logins": 1}\n')
+        self.laptop.path(".fail-decrypt").unlink()
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "changed", "retried decrypting")
+        self.assertEqual(self.laptop.path("secrets/local/ledger-laptop.json").read_text(), '{"logins": 1}\n')
+
+        # Another machine's ledger is not this machine's own.
+        self.laptop.path(".fail-decrypt").write_text("")
+        self.world.commit("secrets", {"encrypted/other.env.enc": base64.b64encode(b"OTHER=1\n").decode()})
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "failed", "decrypting failed")
+        self.laptop.path("secrets/local/ledger-server.json").write_text("{}\n")
+        self.laptop.path(".fail-decrypt").unlink()
+        self.laptop.sync()
+        self.assertState(self.laptop, "secrets", "blocked", "has changed since")
+
     def test_a_failed_decrypt_someone_finished_by_hand_is_behind_us(self):
         self.laptop.path(".fail-decrypt").write_text("")
         self.world.commit("secrets", {"encrypted/new.env.enc": base64.b64encode(b"NEW=1\n").decode()})

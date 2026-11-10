@@ -1,15 +1,20 @@
 """The config, devcluster updating itself, one run at a time, the timer files, and status."""
 
+import contextlib
 import fcntl
+import io
+import os
 import plistlib
 import subprocess
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from devcluster import config as configs
-from devcluster.install import launchd_plist, systemd_units
+from devcluster import install as installer
+from devcluster.install import launchd_plist, systemd_units, timer_path
 from devcluster.paths import Layout
 from devcluster.status import render
 from tests.fakes import ROOT, ClusterTest, git
@@ -128,6 +133,38 @@ class TimerFiles(unittest.TestCase):
         self.assertIn('Environment="PATH=/usr/bin:/bin"', service)
         self.assertIn("OnUnitActiveSec=120", timer)
         self.assertIn("WantedBy=timers.target", timer)
+
+
+SESSION_PATH = ":".join([
+    "/opt/aimgr-claude-runtime/artifacts/" + "a" * 64 + "/bin",
+    "/opt/aimgr-codex-runtime/artifacts/" + "b" * 64,
+    "/Users/me/.aimgr/homes/x/.aim-private-runtime-AbC123/bin",
+    "/opt/homebrew/bin",
+    "/Users/me/.local/bin",
+    "/usr/bin",
+    "/bin",
+])
+
+
+class TimerPath(ClusterTest):
+    """The timer outlives the shell that installed it, so it never keeps one session's folders."""
+
+    def test_leaves_out_the_folders_of_one_session(self):
+        self.assertEqual(timer_path(SESSION_PATH), "/opt/homebrew/bin:/Users/me/.local/bin:/usr/bin:/bin")
+        self.assertEqual(timer_path("/opt/aimgr-claude-runtime/artifacts/" + "a" * 64), "/usr/bin:/bin")
+        # The runtimes' own folders outside a session's artifacts stay.
+        self.assertEqual(timer_path("/opt/aimgr-claude-runtime/bin:/usr/bin"), "/opt/aimgr-claude-runtime/bin:/usr/bin")
+
+    def test_install_writes_the_timer_without_them(self):
+        self.world.config('[devcluster]\n', {"laptop": 'mode = "on"'})
+        home = Path(self.world.root) / "home"
+        scheduled = []
+        env = {"DEVCLUSTER_HOME": str(home / ".devcluster"), "PATH": SESSION_PATH}
+        with mock.patch.dict(os.environ, env), mock.patch.object(installer, "_schedule", lambda layout, interval, path: scheduled.append(path) or []):
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = installer.install("laptop", str(self.world.github / "config.git"), engine_url=self.world.engine(), bin_dir=home / "bin")
+        self.assertEqual(code, 0)
+        self.assertEqual(scheduled, ["/opt/homebrew/bin:/Users/me/.local/bin:/usr/bin:/bin"])
 
 
 class StatusText(unittest.TestCase):

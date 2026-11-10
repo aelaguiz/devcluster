@@ -7,6 +7,7 @@ writes its result. Notifying the owner and SSH are scripts that record what they
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -15,6 +16,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from devcluster import fixer as fixers
 from devcluster.context import Context
@@ -212,6 +214,65 @@ class HandOff(FixerTest):
         self.assertEqual(len(self.runs(laptop)), 3)
         self.assertEqual(self.messages(laptop), ["devcluster on laptop: the agent for work won't start"])
         self.assertIn('account "team" is busy', laptop.path("notified.txt").read_text())
+        self.assertIn("starts the agent again every 4 hours", laptop.path("notified.txt").read_text())
+
+    def test_an_agent_command_that_wouldnt_start_is_tried_again_hours_later(self):
+        # Its login had expired. Once it's back, the item gets its fixer.
+        laptop = self.laptop
+        self.block(laptop)
+        path = laptop.path("agent")
+        self.agent(laptop, ":")
+        path.write_text('#!/bin/sh\necho "agent: not logged in" >&2\nexit 1\n')
+        laptop.sync(now=T0 + 120)
+        for run in range(1, 4):
+            laptop.sync(now=T0 + 120 + run * 120)
+            self.wait(laptop, run)
+        stalled = T0 + 600
+        laptop.sync(now=stalled)
+        self.assertEqual(self.messages(laptop), ["devcluster on laptop: the agent for work won't start"])
+        laptop.sync(now=stalled + fixers.RESTART_AFTER - 120)
+        self.assertEqual(len(self.runs(laptop)), 3, "it waits before starting again")
+
+        # Still broken: one more start, then another wait, and no second message.
+        laptop.sync(now=stalled + fixers.RESTART_AFTER)
+        self.assertState(laptop, "work", "busy")
+        self.wait(laptop, 4)
+        later = stalled + fixers.RESTART_AFTER + 120
+        laptop.sync(now=later)
+        laptop.sync(now=later + 120)
+        self.assertEqual(len(self.runs(laptop)), 4)
+
+        # The login is back.
+        self.agent(laptop, "rm notes2.txt", summary="removed this machine's older notes2.txt")
+        laptop.sync(now=later + fixers.RESTART_AFTER)
+        self.assertState(laptop, "work", "busy")
+        self.wait(laptop, 5)
+        laptop.sync(now=later + fixers.RESTART_AFTER + 120)
+        self.assertState(laptop, "work", "changed", "an agent fixed it at")
+        self.assertEqual(self.messages(laptop), ["devcluster on laptop: the agent for work won't start"])
+
+    def test_an_agent_that_ran_after_a_no_start_and_couldnt_fix_it_still_gives_up(self):
+        laptop = self.laptop
+        self.block(laptop)
+        path = laptop.path("agent")
+        self.agent(laptop, ":")
+        path.write_text('#!/bin/sh\nexit 1\n')
+        laptop.sync(now=T0 + 120)
+        for run in range(1, 4):
+            laptop.sync(now=T0 + 120 + run * 120)
+            self.wait(laptop, run)
+        stalled = T0 + 600
+        laptop.sync(now=stalled)
+        self.agent(laptop, ":", outcome="could-not-fix", summary="couldn't tell which copy is right")
+        laptop.sync(now=stalled + fixers.RESTART_AFTER)
+        self.wait(laptop, 4)
+        laptop.sync(now=stalled + fixers.RESTART_AFTER + 120)
+        laptop.sync(now=stalled + 3 * fixers.RESTART_AFTER)
+        self.assertEqual(len(self.runs(laptop)), 4)
+        self.assertEqual(self.messages(laptop), [
+            "devcluster on laptop: the agent for work won't start",
+            "devcluster on laptop: work is stuck, and the agent couldn't fix it",
+        ])
 
     def test_stops_an_agent_that_runs_out_of_time(self):
         laptop = self.laptop
@@ -312,12 +373,76 @@ class Saving(FixerTest):
         git(self.world.root, "clone", "--quiet", *args, self.url, str(path))
         return path
 
-    def save(self, path, in_way=()):
+    def save(self, path, in_way=(), **options):
         item = SimpleNamespace(kind="repo", name="work", get=lambda key, default=None: {"path": str(path)}.get(key, default))
         env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
         env.update({k: v for k, v in base_env().items() if k.startswith("GIT_")})
         from devcluster.git import Git
-        return fixers.save(Git(path, env), "laptop", item, T0, in_way)
+        return fixers.save(Git(path, env), "laptop", item, T0, in_way, **options)
+
+    def slow_git(self):
+        """A git first on PATH that takes 30 seconds over every add."""
+        folder = self.world.root / "slow-bin"
+        folder.mkdir(exist_ok=True)
+        script = folder / "git"
+        script.write_text(f'#!/bin/sh\ncase " $* " in *" add "*) sleep 30 ;; esac\nexec "{shutil.which("git")}" "$@"\n')
+        script.chmod(0o755)
+        return mock.patch.dict(os.environ, {"PATH": f"{folder}:{os.environ['PATH']}"})
+
+    def test_a_shared_checkout_saves_its_tracked_edits_and_whats_in_the_way(self):
+        path = self.checkout()
+        (path / "notes.txt").write_text("a session's edit\n")
+        (path / "in-the-way.txt").write_text("blocks the pull\n")
+        (path / "screenshot.png").write_text("a session's screenshot\n")
+        saved = self.save(path, ["in-the-way.txt"], untracked=False)
+        self.assertTrue(saved["pushed"], saved)
+        files = git(path, "ls-tree", "-r", "--name-only", saved["commit"]).splitlines()
+        self.assertEqual(sorted(files), ["README.md", "in-the-way.txt", "notes.txt"])
+        self.assertEqual(git(path, "show", f"{saved['commit']}:notes.txt"), "a session's edit")
+        self.assertTrue((path / "screenshot.png").exists())
+
+    def test_a_save_that_takes_too_long_stops_and_leaves_nothing_behind(self):
+        path = self.checkout()
+        (path / "notes.txt").write_text("edited\n")
+        index_before = (path / ".git" / "index").read_bytes()
+        started = time.time()
+        with self.slow_git(), mock.patch.object(fixers, "SAVE_TIMEOUT", 1):
+            saved = self.save(path)
+        self.assertLess(time.time() - started, 20)
+        self.assertTrue(saved.get("timed_out"), saved)
+        self.assertEqual(git(path, "for-each-ref", "refs/heads/devcluster"), "")
+        self.assertEqual((path / ".git" / "index").read_bytes(), index_before)
+        self.assertEqual(sorted(p.name for p in (path / ".git").iterdir() if p.name.startswith("devcluster")), [])
+
+    def test_no_agent_starts_when_the_save_takes_too_long_and_it_tries_again_later(self):
+        path = self.checkout()
+        (path / "notes.txt").write_text("edited\n")
+        layout = SimpleNamespace(state=self.world.root / "state", config=self.world.root)
+        config = SimpleNamespace(machines={"laptop": SimpleNamespace(mode="on")}, fixer={}, fixer_machines={}, setting=lambda k, d: d)
+        ctx = Context("laptop", False, config, T0, {})
+        fixer = fixers.Fixer(layout, ctx, config, "laptop", dict(fixers.DEFAULTS, command="agent"))
+        fields = {"path": str(path), "url": self.url}
+        item = SimpleNamespace(kind="repo", name="work", fields=fields, get=lambda key, default=None: fields.get(key, default))
+        launched = []
+        fixer._launch = lambda *args, **extra: launched.append(args) or False
+
+        def run_once(minutes):
+            fixer.now = ctx.now = T0 + minutes * 60
+            result = ItemResult("repo", "work", BLOCKED, "pulling 3 commits would overwrite notes.txt")
+            fixer._track([result], set(), {"repo:work"})
+            fixer._hand_off([item], [result])
+            return result
+
+        with self.slow_git(), mock.patch.object(fixers, "SAVE_TIMEOUT", 1):
+            run_once(0)
+            result = run_once(2)
+            self.assertEqual(launched, [])
+            self.assertIn("no agent was started: recording its local files took longer than 1 second", result.summary)
+            result = run_once(10)
+            self.assertIn("tries again after", result.summary)
+        self.assertEqual(launched, [])
+        run_once(2 + fixers.RESTART_AFTER // 60)
+        self.assertEqual(len(launched), 1)
 
     def test_a_sparse_checkout_records_no_deletions(self):
         self.world.commit("work", {"inside/a.txt": "a\n", "outside/b.txt": "b\n"})

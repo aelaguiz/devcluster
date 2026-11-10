@@ -1,6 +1,7 @@
 """CLIs at a pinned version or at the version one machine has, logins each machine makes for
 itself, the secrets repo, and files put in place from the config."""
 
+import fnmatch
 import hashlib
 import os
 import re
@@ -185,7 +186,7 @@ def sync_secrets(item, ctx):
     # the decrypted files changed since it failed, retry instead of blocking for good.
     memory = ctx.mem(item)
     retrying = "decrypt_pending" in memory
-    if retrying and _plaintext(git) != memory.get("plaintext"):
+    if retrying and _plaintext(git, _own(item, ctx)) != memory.get("plaintext"):
         # Something wrote here since: an edit nobody has published, or someone (often the fixer)
         # finishing what the decrypt couldn't. Once every plain file matches Git, a decrypt has
         # nothing left to overwrite, and the failed one is behind us.
@@ -298,12 +299,20 @@ def _would_both_ways(item, git, branch, timeout, retrying):
     return result(item, WOULD_CHANGE, "would " + ", then ".join(plans))
 
 
-def _plaintext(git):
+def _own(item, ctx):
+    """The [secrets] item's own: files this machine keeps for itself and decrypt never writes."""
+    return [pattern.replace("{machine}", ctx.machine) for pattern in item.get("own", [])]
+
+
+def _plaintext(git, own=()):
     """The size and modification time of each file Git doesn't track, which is where the
-    decrypted secrets live. Nothing derived from their contents is kept."""
+    decrypted secrets live, leaving out this machine's own files, which change all the time
+    and which no decrypt writes. Nothing derived from their contents is kept."""
     listing = git.run("ls-files", "-z", "--others", timeout=120)
     prints = {}
     for name in sorted(filter(None, listing.out.split("\0"))):
+        if any(fnmatch.fnmatchcase(name, pattern) for pattern in own):
+            continue
         try:
             stat = (git.path / name).stat()
             prints[name] = [stat.st_size, stat.st_mtime_ns]
@@ -317,11 +326,11 @@ def _decrypt(item, ctx, git, timeout, done):
     memory = ctx.mem(item)
     decrypted = shell(item.get("decrypt"), cwd=path, timeout=timeout)
     if not decrypted.ok:
-        memory.update(decrypt_pending=git.rev("HEAD"), plaintext=_plaintext(git))
+        memory.update(decrypt_pending=git.rev("HEAD"), plaintext=_plaintext(git, _own(item, ctx)))
         return result(item, FAILED, f"{done}, but decrypting failed (exit {decrypted.code}); check that this machine's key can read it")
     checked = shell(item.get("check"), cwd=path, timeout=timeout)
     if not checked.ok:
-        memory.update(decrypt_pending=git.rev("HEAD"), plaintext=_plaintext(git))
+        memory.update(decrypt_pending=git.rev("HEAD"), plaintext=_plaintext(git, _own(item, ctx)))
         return result(item, FAILED, f"{done} and decrypted, but the check afterwards failed (exit {checked.code})")
     memory.pop("decrypt_pending", None)
     memory.pop("plaintext", None)
