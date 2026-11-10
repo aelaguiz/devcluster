@@ -51,6 +51,7 @@ A Git repo of encrypted secrets, with its own commands to check, decrypt and pub
 | `check` | yes | A command, run in the checkout, that succeeds when the decrypted files match the encrypted ones |
 | `decrypt` | yes | A command, run in the checkout, that writes the decrypted files |
 | `publish` | no | A command, run in the checkout, that encrypts what changed on this machine into the files Git tracks. With it, the repo syncs both ways |
+| `own` | no | Files in the checkout that are each machine's own and that the decrypt never writes, such as a log something on the machine keeps there, as paths in the checkout. `*` matches any characters, and `{machine}` is the machine's name: `["local/logins/{machine}.json"]`. A change to one of them doesn't count as a local edit after a failed decrypt. |
 | `branch` | no | Defaults to `main` |
 | `timeout` | no | Seconds for each command, default 600 |
 
@@ -72,8 +73,11 @@ A repo people and agents commit to directly on one branch. It syncs both ways.
 | `install` | no | A command run in the checkout whenever its commit changes |
 | `check` | no | A command run in the checkout after the install. See [Installs](#installs). |
 | `installs_into` | no | The folders the install writes into. See [Installs](#installs). |
-| `timeout` | no | Seconds for a fetch or push, default 600 |
+| `sync` | no | A command, run in the checkout, that brings origin's commits in and pushes this machine's, used instead of devcluster's own fetch, merge and push. Use it for a checkout many live sessions edit and commit to at once, where the repo ships a script that merges around their uncommitted edits and their commits landing mid-merge. |
+| `timeout` | no | Seconds for a fetch or push, or for the `sync` command, default 600 |
 | `install_timeout` | no | Seconds for the install, and for the check, default 1800 |
+
+With `sync`, devcluster still clones a missing checkout, requires the branch, and runs the install and check when the commit changed. It runs the command only when the branch and origin differ, then fetches and compares them with how they were before, to report what came in and went out. A failing command fails the item, with its last line of errors as the summary. Origin moving on again straight after is normal; the item fails only if origin's earlier commits didn't come in or this machine's didn't reach origin. When the fixer takes a stuck one, the branch it saves first holds the edits to tracked files and the files in the way, not every untracked file the sessions left there.
 
 ### [[tool]]
 

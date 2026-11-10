@@ -30,6 +30,8 @@ DEFAULTS = {"timeout": 1800, "wait": 1800, "failed_after": 1800, "quiet_after": 
 NOTE_FOR = 24 * 3600     # how long a fixed item's status line says an agent fixed it
 MAX_WAITS = 6            # "someone is working there" this many times running, then the owner hears
 MAX_STARTS = 3           # the agent command ending at once without a result, then the owner hears
+RESTART_AFTER = 4 * 3600 # seconds; then an agent command that wouldn't start, or a save that ran out of time, is tried again
+SAVE_TIMEOUT = 300       # seconds for recording a checkout's local files; every item's sync waits on it
 QUICK = 120              # seconds; an agent that ends sooner without a result never got going
 NOT_TRIES = ("waiting", "no-start")
 KEEP_RUNS = 30 * 86400   # run folders older than this are removed
@@ -212,6 +214,8 @@ class Fixer:
             if not episode or key not in items or result.state not in (BLOCKED, FAILED):
                 continue
             if self.now < episode.get("next_try", 0) or episode.get("notified"):
+                if episode.get("not_started") and not episode.get("notified"):
+                    result.summary += f"; {episode['not_started']}"
                 continue  # the owner hears once, and the item stays theirs until it syncs
             if episode["state"] == BLOCKED:
                 ready = episode["runs"] >= 2
@@ -222,15 +226,27 @@ class Fixer:
             tries = [a for a in episode["attempts"] if a["outcome"] not in NOT_TRIES]
             waits = [a for a in episode["attempts"] if a["outcome"] == "waiting"]
             owner = [a for a in tries if a["outcome"] == "needs-owner" and a["fp"] == episode["fp"]]
-            if owner or len(tries) >= 2 or (tries and tries[-1]["fp"] == episode["fp"]) or len(waits) >= MAX_WAITS or _stalled(episode):
+            if owner or len(tries) >= 2 or (tries and tries[-1]["fp"] == episode["fp"]) or len(waits) >= MAX_WAITS:
                 if self._notify_item(items[key], episode, owner[-1] if owner else None):
                     episode["notified"] = self.now
+                continue
+            if _stalled(episode) and episode.get("restart_after") != len(episode["attempts"]):
+                # The agent command is what's broken (an expired login, say), not the item, so
+                # the owner hears once and the agent is started again later, once it may work.
+                if not episode.get("told_no_start"):
+                    if not self._notify_item(items[key], episode, None, restarting=True):
+                        continue
+                    episode["told_no_start"] = self.now
+                episode["restart_after"] = len(episode["attempts"])
+                episode["next_try"] = self.now + RESTART_AFTER
                 continue
             if self.state.get("running"):
                 continue
             if self._start_item(items[key], episode):
                 busy = self._busy(self.state["running"])
                 result.state, result.summary = busy.state, busy.summary
+            elif episode.get("not_started"):
+                result.summary += f"; {episode['not_started']}"
 
     # Starting a fixer for an item
 
@@ -250,7 +266,15 @@ class Fixer:
                 here = "its origin is public, so it stays on this machine"
             else:
                 here = None
-            saved = save(Git(path, who), self.machine, item, self.now, in_way, push=here is None, here=here)
+            # A repo with its own sync command is one many sessions share: its sync leaves their
+            # uncommitted work in place, and its untracked files (screenshots, videos) can run to
+            # gigabytes, so only edits to tracked files and the files in the way are saved.
+            saved = save(Git(path, who), self.machine, item, self.now, in_way, push=here is None, here=here, untracked=not item.get("sync"))
+            if saved.get("timed_out"):
+                episode["next_try"] = self.now + RESTART_AFTER
+                episode["not_started"] = f"no agent was started: {saved['error']}, which holds up every item's sync, so devcluster tries again after {clock(episode['next_try'])}"
+                return False
+            episode.pop("not_started", None)
             saved["public"] = here is not None and item.kind != "secrets"
             if item.kind == "secrets":
                 # Decrypted credentials are files Git ignores, so the saved commit doesn't hold
@@ -289,12 +313,14 @@ class Fixer:
 
     # Telling the owner
 
-    def _notify_item(self, item, episode, owner_attempt):
+    def _notify_item(self, item, episode, owner_attempt, restarting=False):
         label = f"{item.kind} {item.name}"
         if owner_attempt:
             opening = f"The {label} on {self.machine} has been stuck since {_when(episode['since'])}. devcluster started an agent on it, and the fix needs you."
         elif _stalled(episode):
             opening = f"The {label} on {self.machine} has been stuck since {_when(episode['since'])}. devcluster tried {MAX_STARTS} times to start an agent on it, and the agent command ended at once each time."
+            if restarting:
+                opening += f" It starts the agent again every {RESTART_AFTER // 3600} hours, so the item gets its fix once the command works again. This message isn't sent again."
         else:
             opening = f"The {label} on {self.machine} has been stuck since {_when(episode['since'])}. devcluster started an agent on it, and the agent couldn't fix it."
         lines = [opening, ""]
@@ -421,11 +447,12 @@ def _ssh():
 # Saving a checkout
 
 
-def save(git, machine, item, now, in_way=(), push=True, here=None):
+def save(git, machine, item, now, in_way=(), push=True, here=None, untracked=True):
     """One commit holding everything local in the checkout, on a devcluster/saved/ branch.
     It is built from a copy of the index, so the working tree, the real index and the branch
     are untouched; the copy keeps a sparse checkout's skip flags, so files outside the sparse
-    folders aren't recorded as deleted. Local commits are its ancestors."""
+    folders aren't recorded as deleted. Local commits are its ancestors. Without untracked,
+    it holds edits to tracked files and the files in the way, not every untracked file."""
     stamp = time.strftime("%Y%m%d-%H%M", time.localtime(now))
     branch = f"devcluster/saved/{machine}/{item.name}/{stamp}"
     index = git.git_path("index")
@@ -442,7 +469,10 @@ def save(git, machine, item, now, in_way=(), push=True, here=None):
         # What was staged, before the working tree is added over it. This fails when the index
         # holds a conflict; then the working tree's version is what there is.
         staged_tree = git.run("write-tree", env=env, timeout=600)
-        added = git.run("add", "-A", "--sparse", env=env, timeout=3600)
+        added = git.run("add", "-A" if untracked else "-u", "--sparse", env=env, timeout=SAVE_TIMEOUT)
+        if added.timed_out:
+            limit = f"{SAVE_TIMEOUT // 60} minutes" if SAVE_TIMEOUT >= 120 else f"{SAVE_TIMEOUT} second{'s' if SAVE_TIMEOUT != 1 else ''}"
+            return {"error": f"recording its local files took longer than {limit}", "timed_out": True}
         if not added.ok:
             return {"error": f"couldn't record the local files: {added.first_line()}"}
         named = [name for name in in_way if name and (git.path / name).exists()]
@@ -452,14 +482,16 @@ def save(git, machine, item, now, in_way=(), push=True, here=None):
         if not tree.ok:
             return {"error": f"couldn't record the local files: {tree.first_line()}"}
     finally:
-        try:
-            copy.unlink()
-        except OSError:
-            pass
+        for leftover in (copy, copy.with_name(copy.name + ".lock")):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+    what = "its commits, uncommitted edits and untracked files" if untracked else "its commits, uncommitted edits to tracked files, and the files in the way"
     message = (
         f"devcluster saved {item.kind} {item.name} on {machine} before handing it to the fixer\n\n"
         f"Everything local in {item.get('path')} at {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))}: "
-        "its commits, uncommitted edits and untracked files. The engine changed nothing here.\n"
+        f"{what}. The engine changed nothing here.\n"
     )
     parents = ["-p", head] if head else []
     head_tree = git.out("rev-parse", f"{head}^{{tree}}", timeout=60) if head else None
@@ -475,7 +507,7 @@ def save(git, machine, item, now, in_way=(), push=True, here=None):
     named = git.run("update-ref", f"refs/heads/{branch}", sha, timeout=60)
     if not named.ok:
         return {"error": f"made the saved commit {sha[:10]} but couldn't name a branch for it: {named.first_line()}", "commit": sha}
-    saved = {"branch": branch, "commit": sha, "pushed": False}
+    saved = {"branch": branch, "commit": sha, "pushed": False, "untracked": untracked}
     if push:
         pushed = git.run("push", "--quiet", "origin", f"{sha}:refs/heads/{branch}", timeout=int(item.get("timeout", 600)))
         saved["pushed"] = pushed.ok
@@ -615,7 +647,7 @@ def item_brief(fixer, item, episode, saved, run_dir, path):
     fields = dict(item.fields)
     if kind in ("repo", "secrets"):
         fields.setdefault("branch", "main")
-    for field in ("url", "branch", "ref", "version", "check", "install", "source", "targets", "decrypt", "run", "hours"):
+    for field in ("url", "branch", "ref", "version", "sync", "check", "install", "source", "targets", "decrypt", "run", "hours"):
         if fields.get(field):
             value = ", ".join(fields[field]) if isinstance(fields[field], list) else fields[field]
             lines.append(f"- {field.capitalize()}: {value}")
@@ -628,7 +660,11 @@ def item_brief(fixer, item, episode, saved, run_dir, path):
     lines += ["", "## What the engine has done", ""]
     if saved and saved.get("branch"):
         where = "and it reached origin" if saved.get("pushed") else f"on this machine only ({saved.get('error', 'the push failed')})"
-        lines.append(f"- Saved everything local in this checkout to branch {saved['branch']} (commit {saved['commit'][:10]}), {where}.")
+        if saved.get("untracked", True):
+            lines.append(f"- Saved everything local in this checkout to branch {saved['branch']} (commit {saved['commit'][:10]}), {where}.")
+        else:
+            lines.append(f"- Saved this checkout's commits, its edits to tracked files and the files in the way to branch {saved['branch']} (commit {saved['commit'][:10]}), {where}.")
+            lines.append("- Its other untracked files are not on that branch: many sessions share this checkout, and its own sync command leaves their work in place. Don't remove or move an untracked file that isn't in the way.")
         if saved.get("public"):
             lines.append("- Anyone can read this repo's origin. Whatever you commit and push there is published, so local notes, plans and other private files stay on this machine.")
     elif saved:

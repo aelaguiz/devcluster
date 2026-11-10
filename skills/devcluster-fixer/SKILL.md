@@ -16,7 +16,7 @@ The cluster's owner set this up so the machines look after themselves. A stuck i
 - the local commits, as its ancestors;
 - what was staged, as its second parent, when that differs from the working tree;
 - the uncommitted edits;
-- the untracked files;
+- the untracked files, except in a repo with its own `sync` command, a checkout many sessions share: there only the untracked files in the way are in it, and the brief says so;
 - any ignored files Git named as in the way.
 
 Other files Git ignores, such as build output or a local `.env`, are not in it, so leave them where they are. In the secrets checkout the brief names a private folder holding a copy of the decrypted files instead, which must never go on a branch.

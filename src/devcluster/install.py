@@ -16,6 +16,19 @@ LABEL = "io.github.aelaguiz.devcluster.sync"
 UNIT = "devcluster-sync"
 
 
+# Folders that belong to one agent session: an AI Manager session's own Claude or Codex build,
+# and its private runtime folder. The timer outlives the session that ran install, so a PATH
+# naming them would keep running that session's old tools months later.
+_SESSION_PREFIXES = ("/opt/aimgr-claude-runtime/artifacts/", "/opt/aimgr-codex-runtime/artifacts/")
+_SESSION_PART = "/.aim-private-runtime-"
+
+
+def timer_path(path):
+    """The installing shell's PATH without the folders that belong to one session."""
+    kept = [entry for entry in path.split(":") if not entry.startswith(_SESSION_PREFIXES) and _SESSION_PART not in entry]
+    return ":".join(kept) or "/usr/bin:/bin"
+
+
 def launchd_plist(layout, interval, path):
     program = str(layout.engine / "bin" / "devcluster")
     return plistlib.dumps({
@@ -189,7 +202,7 @@ def install(machine, config_url, engine_url=None, interval=120, bin_dir=None, sc
     if str(shim.parent) not in os.environ.get("PATH", "").split(":"):
         lines.append(f"{shim.parent} isn't on your PATH.")
     if schedule:
-        lines += _schedule(layout, interval, path or os.environ.get("PATH", "/usr/bin:/bin"))
+        lines += _schedule(layout, interval, timer_path(path or os.environ.get("PATH", "/usr/bin:/bin")))
     for line in lines:
         print(line)
     return 0

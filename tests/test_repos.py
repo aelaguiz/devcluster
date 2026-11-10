@@ -312,3 +312,108 @@ class RepoSync(ClusterTest):
         self.assertState(self.laptop, "work", "changed", "cloned it")
         self.laptop.sync()
         self.assertState(self.laptop, "work", "ok")
+
+
+SYNCED = """\
+[[repo]]
+name = "work"
+path = "~/workspace/work"
+url = "{url}"
+sync = '"$HOME/sync.sh"'
+install = 'echo done >> "$HOME/installed"'
+"""
+
+# The repo's own sync script, as a shared checkout ships one: here a plain pull and push.
+PULL_AND_PUSH = "git pull --quiet --no-rebase --no-edit origin main && git push --quiet origin HEAD:main"
+
+
+class RepoSyncCommand(ClusterTest):
+    """A repo whose own command brings origin in and pushes, in place of devcluster's."""
+
+    def setUp(self):
+        super().setUp()
+        self.url = self.world.remote("work", {"README.md": "hello\n", "notes.txt": "one\n"})
+        self.world.config(SYNCED.format(url=self.url), {"laptop": 'mode = "on"'})
+        self.laptop = self.world.machine("laptop")
+        self.script(PULL_AND_PUSH)
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "changed", "cloned it")
+        self.assertEqual(self.runs(), 0, "a clone needs no sync command")
+
+    def script(self, body):
+        path = self.laptop.path("sync.sh")
+        path.write_text(f'#!/bin/sh\necho ran >> "$HOME/sync-ran"\n{body}\n')
+        path.chmod(0o755)
+
+    def runs(self):
+        ran = self.laptop.path("sync-ran")
+        return len(ran.read_text().splitlines()) if ran.exists() else 0
+
+    def installs(self):
+        done = self.laptop.path("installed")
+        return len(done.read_text().splitlines()) if done.exists() else 0
+
+    def test_up_to_date_runs_nothing(self):
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "ok", "up to date at")
+        self.assertEqual(self.runs(), 0)
+
+    def test_pulls_with_the_command_and_installs(self):
+        new = self.world.commit("work", {"README.md": "hello again\n"})
+        installed = self.installs()
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "changed", "pulled 1 commit; now at")
+        self.assertEqual(self.runs(), 1)
+        self.assertEqual(self.laptop.git("workspace/work", "rev-parse", "HEAD"), new)
+        self.assertEqual(self.installs(), installed + 1)
+
+    def test_pushes_with_the_command(self):
+        mine = self.laptop.commit("workspace/work", {"mine.txt": "x\n"})
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "changed", "pushed 1 commit")
+        self.assertEqual(self.world.head("work"), mine)
+
+    def test_merges_with_the_command(self):
+        self.world.commit("work", {"theirs.txt": "b\n"})
+        self.laptop.commit("workspace/work", {"mine.txt": "a\n"})
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "changed", "merged 1 commit from origin; pushed 1 commit")
+        self.assertEqual(self.world.head("work"), self.laptop.git("workspace/work", "rev-parse", "HEAD"))
+
+    def test_a_failing_command_fails_with_its_last_error_line(self):
+        self.script('echo "starting" >&2; echo "error: cannot lock ref HEAD" >&2; exit 3')
+        self.world.commit("work", {"README.md": "new\n"})
+        self.laptop.sync()
+        item = self.assertState(self.laptop, "work", "failed", "its sync command failed (exit 3): error: cannot lock ref HEAD")
+        self.assertIn("starting", item["detail"])
+
+    def test_origin_moving_again_straight_after_is_fine(self):
+        # Another machine pushes the moment this one's sync finishes.
+        self.script(PULL_AND_PUSH + ' && later=$(git commit-tree "HEAD^{tree}" -p HEAD -m later) && git push --quiet origin "$later:refs/heads/main"')
+        self.world.commit("work", {"README.md": "new\n"})
+        mine = self.laptop.commit("workspace/work", {"mine.txt": "x\n"})
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "changed", "merged 1 commit from origin; pushed 1 commit")
+        self.laptop.git("workspace/work", "merge-base", "--is-ancestor", mine, "origin/main")
+        self.assertNotEqual(self.world.head("work"), self.laptop.git("workspace/work", "rev-parse", "HEAD"))
+
+    def test_a_command_that_left_commits_behind_fails(self):
+        self.script("true")
+        self.world.commit("work", {"README.md": "new\n"})
+        self.laptop.commit("workspace/work", {"mine.txt": "x\n"})
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "failed", "its sync command succeeded, but origin's 1 commit didn't come in and this machine's 1 commit didn't reach origin")
+
+    def test_dry_run_says_what_the_command_would_do_and_runs_nothing(self):
+        self.world.commit("work", {"README.md": "new\n"})
+        self.laptop.commit("workspace/work", {"mine.txt": "x\n"})
+        self.laptop.sync("--dry-run")
+        self.assertState(self.laptop, "work", "would-change", "would run its sync command to pull 1 commit and push 1 commit, and run its install")
+        self.assertEqual(self.runs(), 0)
+
+    def test_still_needs_the_branch(self):
+        self.laptop.git("workspace/work", "checkout", "--quiet", "-b", "feature")
+        self.world.commit("work", {"README.md": "new\n"})
+        self.laptop.sync()
+        self.assertState(self.laptop, "work", "blocked", "not main")
+        self.assertEqual(self.runs(), 0)
