@@ -188,8 +188,11 @@ A command that runs once a night on each machine, such as Git's maintenance on t
 | `run` | yes | The command. It runs through `/bin/sh` in the home folder. `$DEVCLUSTER_REPOS` lists the checkouts this machine syncs (its repos, tools and secrets repo), one path to a line. |
 | `hours` | no | The local hours it may start in, such as `"1-5"` (the default) or `"23-4"` |
 | `timeout` | no | Seconds it may run before it is stopped, default 3600 |
+| `early` | no | A command asked each run, outside a run, that exits 0 when the command should start now instead of waiting for the night. Its last line says why, and shows in `devcluster status`. |
 
 The first run inside the hours starts the command in the background, so a long run doesn't hold up syncing, and later runs report how it went: running, how long it took and its last line, or what it exited with. It runs once a night. A machine that sleeps through the hours skips that night instead of running the next morning while someone may be using it. A failed run shows in `devcluster status` until the next night's run. Its output is in `~/.devcluster/state/nightly/NAME/log`.
+
+`early` is for work that can't always wait for the night, such as a disk cleanup on a machine whose disk fills during the day. It runs often, so it should be quick and decide for itself how often a run is worth starting. A run that started within `timeout` of the night's hours counts as that night's.
 
 ## machines/NAME.toml
 
@@ -239,9 +242,10 @@ The disk cleanup is one run on each machine, done by an agent following [skills/
 name = "disk-cleanup"
 run = "devcluster cleanup"
 timeout = 6000
+early = "devcluster cleanup due"
 ```
 
-Its last line, what it freed or why it failed, is what `devcluster status` shows. Without this file, or without `command`, `devcluster cleanup` fails and says so. It is a file of its own so a machine still on an older engine ignores it.
+Its last line, what it freed or why it failed, is what `devcluster status` shows. `devcluster cleanup due` exits 0 when a volume is under its floor and no run has started in the last six hours, so with it as `early`, a disk that fills during the day is cleaned that day. Six hours keeps a disk that is full of live work from being searched over and over: the run before found it live, and hours later tasks have ended. Without this file, or without `command`, `devcluster cleanup` fails and says so. It is a file of its own so a machine still on an older engine ignores it.
 
 | Setting | Default | Meaning |
 |---|---|---|

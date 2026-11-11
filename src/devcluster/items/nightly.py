@@ -3,6 +3,11 @@
 A nightly item starts in the background during its hours, so a long run never holds up the
 sync, and later runs report how it went. It runs once a night. A machine asleep through its
 hours skips that night rather than catching up the next morning, while someone may be using it.
+
+An item can also name an `early` command, asked each run outside a run: when it exits 0, the
+run starts now instead of waiting for the night, such as a disk cleanup on a machine whose disk
+fills during the day. A run that starts within its time limit of the night's hours counts as
+that night's.
 """
 
 import os
@@ -12,11 +17,12 @@ from pathlib import Path
 
 from ..context import result
 from ..paths import clock, expand, now as clock_now
-from ..proc import alive, redact, start, stop, tail
+from ..proc import alive, redact, shell, start, stop, tail
 from ..results import CHANGED, FAILED, OK, WOULD_CHANGE
 
 HOURS = "1-5"
 TIMEOUT = 3600
+EARLY_TIMEOUT = 60
 CHECKOUTS = ("secrets", "repo", "tool")
 _HOURS = re.compile(r"^(\d{1,2})-(\d{1,2})$")
 
@@ -62,17 +68,33 @@ def sync_nightly(item, ctx):
         memory.pop("running")
     tonight = window(ctx.now, hours)
     last = memory.get("last")
-    if tonight and not (last and last["started"] >= tonight[0]):
+    due = tonight and not (last and last["started"] >= tonight[0] - timeout)
+    early = None if due else _early(item)
+    if due or early:
+        why = f": {early}" if early else ""
         if ctx.dry_run:
-            return result(item, WOULD_CHANGE, "would start now")
+            return result(item, WOULD_CHANGE, f"would start now{why}")
         at = clock_now()  # not the run's start: the items before this may have taken a while
         started, problem = _launch(item, ctx, folder)
         if started is None:
             memory["last"] = {"started": at, "ended": at, "code": None, "said": f"couldn't start: {problem}", "log": ""}
         else:
             memory["running"] = {**started, "started": at}
-            return result(item, CHANGED, f"started at {clock(at)}")
+            return result(item, CHANGED, f"started at {clock(at)}{why}")
     return _report(item, memory.get("last"), hours, ctx.now)
+
+
+def _early(item):
+    """Why the run should start now, outside its hours: the last line of the item's early
+    command when it exits 0. None when it has no early command, or the command says wait."""
+    if not item.get("early"):
+        return None
+    env = {k: v for k, v in os.environ.items() if k != "DEVCLUSTER_CARRY"}
+    asked = shell(item.get("early"), cwd=str(Path.home()), timeout=EARLY_TIMEOUT, env=env)
+    if not asked.ok:
+        return None
+    lines = [line.strip() for line in asked.out.splitlines() if line.strip()]
+    return redact(lines[-1])[:300] if lines else "its early command said to start"
 
 
 def _launch(item, ctx, folder):

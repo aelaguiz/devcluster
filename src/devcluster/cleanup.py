@@ -8,7 +8,8 @@ by the engine itself; and `devcluster cleanup rm`, the one way a run deletes, wh
 kept folder, a mount, a home folder and anything outside the places task folders live.
 
 `[[nightly]] run = "devcluster cleanup"` runs it each night. Its last line is what
-`devcluster status` shows.
+`devcluster status` shows. `devcluster cleanup due`, as that item's `early` command, starts a run
+during the day when a volume falls under its floor.
 """
 
 import datetime
@@ -33,6 +34,11 @@ KEEP_DAYS = 14        # days a run's folder stays, by default
 STATUSES = ("ok", "warning", "failed")
 SKILL = engine_root() / "skills" / "disk-cleanup" / "SKILL.md"  # the engine this run is part of
 TASK_PLACES = ("/tmp", "/private/tmp", "/private/var/folders")
+# A volume under its floor starts a run during the day, but not within this long of the last
+# run's start. A run that left it under its floor found everything else there live; some hours
+# later tasks have ended and there is more to clear, and a machine filling that fast can run
+# out before the night. Asked sooner, a run would only find the same live work again.
+EARLY_AFTER = 6 * 3600
 
 
 # One run
@@ -62,6 +68,41 @@ def run(dry_run=False):
         return _run(layout, config, machine, command, folder, dry_run)
     finally:
         held.close()
+
+
+def due():
+    """Exit 0, saying why, when this machine should be cleaned now rather than tonight: a volume
+    is under its floor, and no run has started in the last EARLY_AFTER. Otherwise exit 1."""
+    layout = Layout()
+    machine = layout.machine()
+    if not machine:
+        return _end("devcluster isn't set up on this machine", 1)
+    try:
+        config = configs.load(layout.config)
+    except configs.ConfigError as error:
+        return _end(f"the config has problems: {error.errors[0]}", 1)
+    if machine not in config.machines or not config.cleanup.get("command", "").strip():
+        return _end("no cleanup is set up for this machine", 1)
+    under = []
+    for volume in measure(_volumes(config, machine)):
+        volume["after_free"] = volume.get("before_free")
+        if under_floor(volume) is not None:
+            under.append(f"{volume['path']} is under its {volume['floor']} floor with {human(volume['after_free'])} free")
+    if not under:
+        return _end("every volume is above its floor", 1)
+    last = _last_start(layout.state / "cleanup")
+    if last is not None and clock_now() - last < EARLY_AFTER:
+        return _end(f"{under[0]}, and a run started at {clock(last)}", 1)
+    return _end("; ".join(under), 0)
+
+
+def _last_start(folder):
+    """When the newest run started, from its record, or None."""
+    previous = _previous(folder)
+    try:
+        return float(json.loads((previous / "result.json").read_text())["started"]) if previous else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def _run(layout, config, machine, command, folder, dry_run):

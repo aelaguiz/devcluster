@@ -202,6 +202,31 @@ class Run(CleanupTest):
         self.assertNotIn("warning", result.stdout)
         self.assertIn("freed ", result.stdout)
 
+    def test_due_when_a_volume_is_under_its_floor_and_no_run_started_lately(self):
+        laptop = self.cluster(cleanup='command = \'"$HOME/agent"\'\n[machines.laptop]\nfloors = { "/" = "100%" }\n')
+        self.agent(laptop)
+        due = laptop.run("cleanup", "due")
+        self.assertEqual(due.returncode, 0)
+        self.assertIn("/ is under its 100% floor with ", due.stdout)
+        started = time.time()
+        laptop.run("cleanup", now=started)
+        due = laptop.run("cleanup", "due", now=started + 3600)
+        self.assertEqual(due.returncode, 1)
+        self.assertIn(f"and a run started at {time.strftime('%H:%M', time.localtime(started))}", due.stdout)
+        self.assertEqual(laptop.run("cleanup", "due", now=started + 7 * 3600).returncode, 0)
+
+    def test_not_due_while_every_volume_is_above_its_floor(self):
+        laptop = self.cluster(cleanup='command = \'"$HOME/agent"\'\n[machines.laptop]\nfloors = { "/" = "1K" }\n')
+        due = laptop.run("cleanup", "due")
+        self.assertEqual(due.returncode, 1)
+        self.assertIn("every volume is above its floor", due.stdout)
+
+    def test_not_due_without_a_cleanup(self):
+        laptop = self.cluster(cleanup="")
+        due = laptop.run("cleanup", "due")
+        self.assertEqual(due.returncode, 1)
+        self.assertIn("no cleanup is set up for this machine", due.stdout)
+
     def test_a_missing_drive_is_skipped_and_named(self):
         laptop = self.cluster(cleanup='command = \'"$HOME/agent"\'\n[machines.laptop]\nfloors = { "/" = "1K", "/devcluster-no-such-drive" = "10%" }\n')
         self.agent(laptop)

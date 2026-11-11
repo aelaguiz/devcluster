@@ -24,7 +24,7 @@ FIELDS = {
     "login": ({"name", "check", "login"}, {"timeout", "login_timeout"}),
     "file": ({"name", "source", "targets"}, set()),
     "settings": ({"name", "file", "from"}, {"own", "only"}),
-    "nightly": ({"name", "run"}, {"hours", "timeout"}),
+    "nightly": ({"name", "run"}, {"hours", "timeout", "early"}),
 }
 HOURS = re.compile(r"^(\d{1,2})-(\d{1,2})$")
 DOTTED = re.compile(r"^([A-Za-z0-9_-]+|\*)(\.([A-Za-z0-9_-]+|\*))*$")
