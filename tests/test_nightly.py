@@ -95,6 +95,27 @@ class Nightly(ClusterTest):
         self.assertState(self.laptop, "tidy", "ok", "ran at 23:30")
         self.assertEqual(self.runs(), 1)
 
+    def test_an_early_command_starts_the_run_during_the_day(self):
+        self.start(extra='timeout = 7200\nearly = \'test -e "$HOME/full" && echo the disk is full\'\n')
+        self.laptop.sync(now=at(14))
+        self.assertState(self.laptop, "tidy", "ok", "first runs between 01:00 and 05:00")
+        self.laptop.path("full").write_text("")
+        self.laptop.sync(now=at(23, 30))
+        self.assertState(self.laptop, "tidy", "changed", "started at 23:30: the disk is full")
+        self.finish()
+        self.laptop.path("full").unlink()
+        self.laptop.sync(now=at(1, 15, days=1))
+        self.assertState(self.laptop, "tidy", "ok", "ran at 23:30")
+        self.assertEqual(self.runs(), 1)
+        self.laptop.sync(now=at(1, 15, days=2))
+        self.assertState(self.laptop, "tidy", "changed", "started at 01:15")
+
+    def test_a_dry_run_says_why_it_would_start_early(self):
+        self.start(extra="early = 'echo the disk is full'\n", mode="dry-run")
+        self.laptop.sync(now=at(14))
+        self.assertState(self.laptop, "tidy", "would-change", "would start now: the disk is full")
+        self.assertEqual(self.runs(), 0)
+
 
 class Hours(unittest.TestCase):
     def test_reads_hours(self):

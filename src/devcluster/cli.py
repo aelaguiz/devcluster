@@ -92,6 +92,7 @@ def main(argv=None):
     rm = clean_commands.add_parser("rm", help="remove folders, refusing anything kept, a mount, a home folder or a link")
     rm.add_argument("paths", nargs="+", metavar="PATH")
     rm.add_argument("--sudo", action="store_true", help="remove with sudo -n, for files this user can't remove")
+    clean_commands.add_parser("due", help="exit 0, saying why, when a volume is under its floor and no run started in the last 6 hours")
 
     kept = commands.add_parser("keep", help="the folders each machine's cleanup keeps until a date")
     keep_commands = kept.add_subparsers(dest="keep_command", required=True)
@@ -112,6 +113,8 @@ def main(argv=None):
     if args.command == "cleanup":
         if args.cleanup_command == "rm":
             return cleanup.remove(args.paths, args.sudo, args.dry_run)
+        if args.cleanup_command == "due":
+            return cleanup.due()
         return cleanup.run(args.dry_run)
     if args.command == "keep":
         return keep.command(args)
