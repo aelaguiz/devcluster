@@ -58,7 +58,10 @@ class Git:
 
     def run(self, *args, timeout=300, input=None, env=None):
         merged = dict(self.env, **env) if env else self.env
-        return run(["git", "-C", str(self.path), *args], timeout=timeout, env=merged, input=input)
+        # A fetch reads no working tree, so it never waits on the file watcher: the Studio's psagentspace
+        # watcher stopped answering twice on November 15 and hung every sync for hours.
+        watcher = ["-c", "core.fsmonitor=false"] if args and args[0] == "fetch" else []
+        return run(["git", *watcher, "-C", str(self.path), *args], timeout=timeout, env=merged, input=input)
 
     def out(self, *args, timeout=300):
         result = self.run(*args, timeout=timeout)
